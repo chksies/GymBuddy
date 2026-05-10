@@ -1,5 +1,5 @@
 #====================================================================================================
-# START - Testing Protocol - DO NOT EDIT OR REMOVE THIS SECTION
+# START - Testing Protocol - DO NOT EDIT OR REMOVE THIS SECTION FOR ANY REASON
 #====================================================================================================
 
 # THIS SECTION CONTAINS CRITICAL TESTING INSTRUCTIONS FOR BOTH AGENTS
