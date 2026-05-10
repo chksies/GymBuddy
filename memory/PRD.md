@@ -1,4 +1,5 @@
 # GymBuddy - Product Requirements Document
+# gym requirments
 
 ## Overview
 GymBuddy is a social fitness accountability app inspired by Locket and Snapchat, designed specifically for gym-goers. The app helps friends stay accountable to their fitness goals by sharing gym check-in photos and maintaining streaks.
