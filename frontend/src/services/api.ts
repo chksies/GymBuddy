@@ -1,3 +1,4 @@
+//gotta research on axios man, ai wrote ts
 import axios from 'axios';
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
