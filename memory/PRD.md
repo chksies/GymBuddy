@@ -20,7 +20,8 @@ GymBuddy is a social fitness accountability app inspired by Locket and Snapchat,
 ### 3. Friend System
 - **Add by Friend Code**: Enter 6-character alphanumeric code
 - **Search by Username**: Find users by their username
-- **QR Code**: Share your code visually (planned feature)
+- **QR Code Generation**: Display your code as scannable QR
+- **QR Code Scanning**: Scan friend's QR code to add (mobile only)
 - Friend request flow (send/accept/decline)
 - Remove friends functionality
 
@@ -41,9 +42,28 @@ GymBuddy is a social fitness accountability app inspired by Locket and Snapchat,
   - Notes
 - Feed of friends' shared workouts
 
-### 6. Profile Management
+### 6. Progress Tracking & Stats Dashboard
+- Total check-ins count
+- Best streak achieved
+- This week/month stats
+- Consistency percentage (last 4 weeks)
+- Check-ins by day of week chart
+- Weekly history chart (last 8 weeks)
+- Active streaks count
+- Gym buddies count
+- Member since date
+
+### 7. Push Notifications (Mobile)
+- Friend posts notifications
+- Streak warning notifications (before expiry)
+- Friend request notifications
+- Toggle settings for each notification type
+- Backend support for storing push tokens
+
+### 8. Profile Management
 - Profile photo upload
 - View friend code
+- Notification settings modal
 - Settings menu (Notifications, Privacy, Help)
 - Logout functionality
 

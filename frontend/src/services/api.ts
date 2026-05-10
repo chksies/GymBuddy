@@ -81,4 +81,22 @@ export const profileApi = {
     api.put('/auth/profile', data),
 };
 
+// Stats API
+export const statsApi = {
+  getStats: () => api.get('/stats'),
+};
+
+// Notifications API
+export const notificationsApi = {
+  registerToken: (push_token: string) => 
+    api.post('/notifications/register', { push_token }),
+  unregisterToken: () => api.delete('/notifications/unregister'),
+  getSettings: () => api.get('/notifications/settings'),
+  updateSettings: (settings: {
+    friend_posts?: boolean;
+    streak_warnings?: boolean;
+    friend_requests?: boolean;
+  }) => api.put('/notifications/settings', settings),
+};
+
 export default api;

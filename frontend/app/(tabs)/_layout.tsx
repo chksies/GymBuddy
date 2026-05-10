@@ -19,7 +19,7 @@ export default function TabsLayout() {
         tabBarActiveTintColor: '#FF6B35',
         tabBarInactiveTintColor: '#666',
         tabBarLabelStyle: {
-          fontSize: 12,
+          fontSize: 10,
           fontWeight: '500',
         },
       }}
@@ -29,7 +29,7 @@ export default function TabsLayout() {
         options={{
           title: 'Feed',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="home" size={size} color={color} />
+            <Ionicons name="home" size={size - 2} color={color} />
           ),
         }}
       />
@@ -38,7 +38,7 @@ export default function TabsLayout() {
         options={{
           title: 'Check In',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="camera" size={size} color={color} />
+            <Ionicons name="camera" size={size - 2} color={color} />
           ),
         }}
       />
@@ -47,7 +47,16 @@ export default function TabsLayout() {
         options={{
           title: 'Streaks',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="flame" size={size} color={color} />
+            <Ionicons name="flame" size={size - 2} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="stats"
+        options={{
+          title: 'Progress',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="stats-chart" size={size - 2} color={color} />
           ),
         }}
       />
@@ -56,7 +65,7 @@ export default function TabsLayout() {
         options={{
           title: 'Friends',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="people" size={size} color={color} />
+            <Ionicons name="people" size={size - 2} color={color} />
           ),
         }}
       />
@@ -65,7 +74,7 @@ export default function TabsLayout() {
         options={{
           title: 'Workouts',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="barbell" size={size} color={color} />
+            <Ionicons name="barbell" size={size - 2} color={color} />
           ),
         }}
       />
@@ -74,7 +83,7 @@ export default function TabsLayout() {
         options={{
           title: 'Profile',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="person" size={size} color={color} />
+            <Ionicons name="person" size={size - 2} color={color} />
           ),
         }}
       />

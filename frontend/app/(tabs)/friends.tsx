@@ -11,10 +11,13 @@ import {
   Alert,
   Image,
   Modal,
+  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import QRCode from 'react-native-qrcode-svg';
 import { friendsApi } from '../../src/services/api';
 import { useAuth } from '../../src/contexts/AuthContext';
 
@@ -54,6 +57,9 @@ export default function FriendsScreen() {
   const [isSearching, setIsSearching] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [showQRModal, setShowQRModal] = useState(false);
+  const [showScanModal, setShowScanModal] = useState(false);
+  const [scanned, setScanned] = useState(false);
+  const [permission, requestPermission] = useCameraPermissions();
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
 
@@ -116,6 +122,8 @@ export default function FriendsScreen() {
       setFriendCode('');
       setSearchQuery('');
       setSearchResults([]);
+      setShowScanModal(false);
+      setScanned(false);
     } catch (error: any) {
       const message = error?.response?.data?.detail || 'Failed to send request';
       Alert.alert('Error', message);
@@ -160,6 +168,33 @@ export default function FriendsScreen() {
         },
       ]
     );
+  };
+
+  const handleBarCodeScanned = ({ data }: { data: string }) => {
+    if (scanned) return;
+    setScanned(true);
+    
+    // Check if it's a valid friend code (6 alphanumeric characters)
+    const codeMatch = data.match(/^[A-Z0-9]{6}$/i);
+    if (codeMatch) {
+      handleAddFriend(data.toUpperCase());
+    } else {
+      Alert.alert('Invalid QR Code', 'This QR code does not contain a valid friend code', [
+        { text: 'OK', onPress: () => setScanned(false) }
+      ]);
+    }
+  };
+
+  const openScanner = async () => {
+    if (!permission?.granted) {
+      const result = await requestPermission();
+      if (!result.granted) {
+        Alert.alert('Permission Required', 'Camera permission is needed to scan QR codes');
+        return;
+      }
+    }
+    setScanned(false);
+    setShowScanModal(true);
   };
 
   const renderFriend = ({ item }: { item: Friend }) => (
@@ -262,12 +297,20 @@ export default function FriendsScreen() {
           <Ionicons name="people" size={28} color="#FF6B35" />
           <Text style={styles.headerTitle}>Friends</Text>
         </View>
-        <TouchableOpacity
-          style={styles.qrButton}
-          onPress={() => setShowQRModal(true)}
-        >
-          <Ionicons name="qr-code" size={24} color="#fff" />
-        </TouchableOpacity>
+        <View style={styles.headerRight}>
+          <TouchableOpacity
+            style={styles.headerButton}
+            onPress={openScanner}
+          >
+            <Ionicons name="scan" size={22} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.headerButton}
+            onPress={() => setShowQRModal(true)}
+          >
+            <Ionicons name="qr-code" size={22} color="#fff" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.tabs}>
@@ -360,6 +403,11 @@ export default function FriendsScreen() {
             </View>
           </View>
 
+          <TouchableOpacity style={styles.scanButton} onPress={openScanner}>
+            <Ionicons name="scan" size={24} color="#fff" />
+            <Text style={styles.scanButtonText}>Scan QR Code</Text>
+          </TouchableOpacity>
+
           <View style={styles.divider}>
             <View style={styles.dividerLine} />
             <Text style={styles.dividerText}>OR</Text>
@@ -399,6 +447,7 @@ export default function FriendsScreen() {
         </View>
       )}
 
+      {/* QR Code Display Modal */}
       <Modal visible={showQRModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -414,11 +463,63 @@ export default function FriendsScreen() {
               <Text style={styles.codeHint}>Share this code with friends</Text>
             </View>
 
-            <View style={styles.qrPlaceholder}>
-              <Ionicons name="qr-code" size={120} color="#FF6B35" />
+            <View style={styles.qrContainer}>
+              {user?.friend_code && (
+                <QRCode
+                  value={user.friend_code}
+                  size={200}
+                  color="#FF6B35"
+                  backgroundColor="#1a1a1a"
+                />
+              )}
               <Text style={styles.qrHint}>Scan to add as friend</Text>
             </View>
           </View>
+        </View>
+      </Modal>
+
+      {/* QR Scanner Modal */}
+      <Modal visible={showScanModal} animationType="slide">
+        <View style={[styles.scannerContainer, { paddingTop: insets.top }]}>
+          <View style={styles.scannerHeader}>
+            <TouchableOpacity onPress={() => setShowScanModal(false)}>
+              <Ionicons name="close" size={28} color="#fff" />
+            </TouchableOpacity>
+            <Text style={styles.scannerTitle}>Scan Friend Code</Text>
+            <View style={{ width: 28 }} />
+          </View>
+
+          {Platform.OS === 'web' ? (
+            <View style={styles.webFallback}>
+              <Ionicons name="scan-outline" size={64} color="#444" />
+              <Text style={styles.webFallbackText}>
+                QR scanning is only available on mobile devices
+              </Text>
+              <Text style={styles.webFallbackHint}>
+                Use the manual code entry instead
+              </Text>
+            </View>
+          ) : (
+            <CameraView
+              style={styles.scanner}
+              barcodeScannerSettings={{
+                barcodeTypes: ['qr'],
+              }}
+              onBarcodeScanned={scanned ? undefined : handleBarCodeScanned}
+            >
+              <View style={styles.scannerOverlay}>
+                <View style={styles.scannerFrame}>
+                  <View style={[styles.corner, styles.topLeft]} />
+                  <View style={[styles.corner, styles.topRight]} />
+                  <View style={[styles.corner, styles.bottomLeft]} />
+                  <View style={[styles.corner, styles.bottomRight]} />
+                </View>
+                <Text style={styles.scannerHint}>
+                  Point camera at a GymBuddy QR code
+                </Text>
+              </View>
+            </CameraView>
+          )}
         </View>
       </Modal>
     </View>
@@ -453,13 +554,18 @@ const styles = StyleSheet.create({
     color: '#fff',
     marginLeft: 10,
   },
-  qrButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  headerButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: '#1a1a1a',
     alignItems: 'center',
     justifyContent: 'center',
+    marginLeft: 8,
   },
   tabs: {
     flexDirection: 'row',
@@ -633,10 +739,25 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginLeft: 8,
   },
+  scanButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#2a2a2a',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 16,
+  },
+  scanButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '500',
+    marginLeft: 8,
+  },
   divider: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginVertical: 20,
+    marginVertical: 12,
   },
   dividerLine: {
     flex: 1,
@@ -718,7 +839,7 @@ const styles = StyleSheet.create({
   },
   codeDisplay: {
     alignItems: 'center',
-    marginBottom: 32,
+    marginBottom: 24,
   },
   bigCode: {
     color: '#FF6B35',
@@ -731,15 +852,99 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginTop: 8,
   },
-  qrPlaceholder: {
+  qrContainer: {
     alignItems: 'center',
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#1a1a1a',
     borderRadius: 16,
     padding: 24,
   },
   qrHint: {
     color: '#888',
     fontSize: 14,
-    marginTop: 12,
+    marginTop: 16,
+  },
+  scannerContainer: {
+    flex: 1,
+    backgroundColor: '#0a0a0a',
+  },
+  scannerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+  },
+  scannerTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  scanner: {
+    flex: 1,
+  },
+  scannerOverlay: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  scannerFrame: {
+    width: 250,
+    height: 250,
+    position: 'relative',
+  },
+  corner: {
+    position: 'absolute',
+    width: 40,
+    height: 40,
+    borderColor: '#FF6B35',
+  },
+  topLeft: {
+    top: 0,
+    left: 0,
+    borderTopWidth: 4,
+    borderLeftWidth: 4,
+  },
+  topRight: {
+    top: 0,
+    right: 0,
+    borderTopWidth: 4,
+    borderRightWidth: 4,
+  },
+  bottomLeft: {
+    bottom: 0,
+    left: 0,
+    borderBottomWidth: 4,
+    borderLeftWidth: 4,
+  },
+  bottomRight: {
+    bottom: 0,
+    right: 0,
+    borderBottomWidth: 4,
+    borderRightWidth: 4,
+  },
+  scannerHint: {
+    color: '#fff',
+    fontSize: 16,
+    marginTop: 32,
+    textAlign: 'center',
+  },
+  webFallback: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 40,
+  },
+  webFallbackText: {
+    color: '#fff',
+    fontSize: 16,
+    textAlign: 'center',
+    marginTop: 16,
+  },
+  webFallbackHint: {
+    color: '#888',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 8,
   },
 });

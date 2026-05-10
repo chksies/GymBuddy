@@ -746,6 +746,172 @@ async def root():
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow()}
 
+# ========================= STATS/PROGRESS ENDPOINTS =========================
+
+@api_router.get("/stats")
+async def get_user_stats(current_user: dict = Depends(get_current_user)):
+    """Get user's gym statistics and progress"""
+    today = datetime.utcnow().date()
+    
+    # Calculate date ranges
+    week_start = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+    
+    # Get all user's posts
+    all_posts = await db.posts.find({"user_id": current_user["id"]}).to_list(1000)
+    
+    # Total check-ins
+    total_checkins = len(all_posts)
+    
+    # This week's check-ins
+    week_checkins = len([p for p in all_posts if p["created_at"].date() >= week_start])
+    
+    # This month's check-ins
+    month_checkins = len([p for p in all_posts if p["created_at"].date() >= month_start])
+    
+    # Get all friendships for streak info
+    friendships = await db.friendships.find({
+        "$or": [
+            {"user1_id": current_user["id"], "status": "accepted"},
+            {"user2_id": current_user["id"], "status": "accepted"}
+        ]
+    }).to_list(1000)
+    
+    # Current active streaks and best streak
+    active_streaks = 0
+    best_streak = 0
+    total_streak_days = 0
+    
+    for f in friendships:
+        streak = f.get("streak_count", 0)
+        if streak > best_streak:
+            best_streak = streak
+        total_streak_days += streak
+        
+        # Check if streak is active
+        last_mutual = f.get("last_mutual_post")
+        if last_mutual:
+            last_mutual_date = last_mutual.date() if isinstance(last_mutual, datetime) else last_mutual
+            if (today - last_mutual_date).days <= 3 and streak > 0:
+                active_streaks += 1
+    
+    # Calculate consistency (check-ins per week over last 4 weeks)
+    four_weeks_ago = today - timedelta(weeks=4)
+    recent_posts = [p for p in all_posts if p["created_at"].date() >= four_weeks_ago]
+    
+    # Group by week
+    weeks_with_checkins = set()
+    for p in recent_posts:
+        post_date = p["created_at"].date()
+        week_num = (post_date - four_weeks_ago).days // 7
+        weeks_with_checkins.add(week_num)
+    
+    consistency_percentage = (len(weeks_with_checkins) / 4) * 100 if recent_posts else 0
+    
+    # Calculate check-ins per day of week (for chart)
+    day_counts = {i: 0 for i in range(7)}  # 0=Monday, 6=Sunday
+    for p in all_posts:
+        day_counts[p["created_at"].weekday()] += 1
+    
+    days_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    checkins_by_day = [{"day": days_of_week[i], "count": day_counts[i]} for i in range(7)]
+    
+    # Get weekly check-in history (last 8 weeks)
+    weekly_history = []
+    for i in range(7, -1, -1):
+        week_date = today - timedelta(weeks=i)
+        week_start_date = week_date - timedelta(days=week_date.weekday())
+        week_end_date = week_start_date + timedelta(days=7)
+        
+        week_posts = len([p for p in all_posts 
+                         if week_start_date <= p["created_at"].date() < week_end_date])
+        weekly_history.append({
+            "week": week_start_date.strftime("%b %d"),
+            "checkins": week_posts
+        })
+    
+    # Friends count
+    friends_count = len(friendships)
+    
+    return {
+        "total_checkins": total_checkins,
+        "week_checkins": week_checkins,
+        "month_checkins": month_checkins,
+        "active_streaks": active_streaks,
+        "best_streak": best_streak,
+        "total_streak_days": total_streak_days,
+        "consistency_percentage": round(consistency_percentage, 1),
+        "friends_count": friends_count,
+        "checkins_by_day": checkins_by_day,
+        "weekly_history": weekly_history,
+        "member_since": current_user["created_at"]
+    }
+
+# ========================= PUSH NOTIFICATIONS =========================
+
+class PushTokenRegister(BaseModel):
+    push_token: str
+
+@api_router.post("/notifications/register")
+async def register_push_token(data: PushTokenRegister, current_user: dict = Depends(get_current_user)):
+    """Register user's push notification token"""
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {"$set": {"push_token": data.push_token}}
+    )
+    return {"message": "Push token registered"}
+
+@api_router.delete("/notifications/unregister")
+async def unregister_push_token(current_user: dict = Depends(get_current_user)):
+    """Remove user's push notification token"""
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {"$unset": {"push_token": ""}}
+    )
+    return {"message": "Push token removed"}
+
+@api_router.get("/notifications/settings")
+async def get_notification_settings(current_user: dict = Depends(get_current_user)):
+    """Get user's notification settings"""
+    settings = await db.notification_settings.find_one({"user_id": current_user["id"]})
+    if not settings:
+        # Default settings
+        settings = {
+            "friend_posts": True,
+            "streak_warnings": True,
+            "friend_requests": True
+        }
+    return {
+        "friend_posts": settings.get("friend_posts", True),
+        "streak_warnings": settings.get("streak_warnings", True),
+        "friend_requests": settings.get("friend_requests", True)
+    }
+
+class NotificationSettings(BaseModel):
+    friend_posts: Optional[bool] = None
+    streak_warnings: Optional[bool] = None
+    friend_requests: Optional[bool] = None
+
+@api_router.put("/notifications/settings")
+async def update_notification_settings(settings: NotificationSettings, current_user: dict = Depends(get_current_user)):
+    """Update user's notification settings"""
+    update_data = {}
+    if settings.friend_posts is not None:
+        update_data["friend_posts"] = settings.friend_posts
+    if settings.streak_warnings is not None:
+        update_data["streak_warnings"] = settings.streak_warnings
+    if settings.friend_requests is not None:
+        update_data["friend_requests"] = settings.friend_requests
+    
+    if update_data:
+        await db.notification_settings.update_one(
+            {"user_id": current_user["id"]},
+            {"$set": update_data},
+            upsert=True
+        )
+    
+    return {"message": "Settings updated"}
+
 # Include the router in the main app
 app.include_router(api_router)
 
