@@ -29,10 +29,14 @@ api.interceptors.request.use(async (config) => {
 
 // Posts API
 export const postsApi = {
-  createPost: (image: string, caption: string) => 
+  createPost: (image: string, caption: string) =>
     api.post('/posts', { image, caption }),
   getFeed: () => api.get('/posts/feed'),
   getMyPosts: () => api.get('/posts/my'),
+  react: (postId: string, emoji: string) =>
+    api.post(`/posts/${postId}/react`, { emoji }),
+  removeReaction: (postId: string) =>
+    api.delete(`/posts/${postId}/react`),
 };
 
 // Friends API

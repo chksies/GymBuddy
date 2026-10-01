@@ -14,6 +14,10 @@ import bcrypt
 import jwt
 import random
 import string
+import asyncio
+
+from push import send_push_notifications, build_message
+from storage import upload_image
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -27,6 +31,9 @@ db = client[os.environ.get('DB_NAME', 'gymbuddy_db')]
 JWT_SECRET = os.environ.get('JWT_SECRET', 'gymbuddy_secret_key_2025')
 JWT_ALGORITHM = 'HS256'
 JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
+
+# Reactions
+ALLOWED_REACTIONS = {"🔥", "💪", "👏", "😮"}
 
 # Security
 security = HTTPBearer()
@@ -79,6 +86,11 @@ class PostResponse(BaseModel):
     image: str
     caption: str
     created_at: datetime
+    reaction_counts: dict = {}
+    my_reaction: Optional[str] = None
+
+class ReactionCreate(BaseModel):
+    emoji: str
 
 class FriendRequest(BaseModel):
     friend_code: str
@@ -152,6 +164,23 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+# ========================= NOTIFICATION HELPERS =========================
+
+async def get_notification_pref(user_id: str, key: str) -> bool:
+    """Notification settings default to on until a user explicitly changes them."""
+    settings = await db.notification_settings.find_one({"user_id": user_id})
+    if not settings:
+        return True
+    return settings.get(key, True)
+
+async def notify_user(user_id: str, setting_key: str, title: str, body: str, data: Optional[dict] = None):
+    user = await db.users.find_one({"id": user_id})
+    if not user or not user.get("push_token"):
+        return
+    if not await get_notification_pref(user_id, setting_key):
+        return
+    await send_push_notifications([build_message(user["push_token"], title, body, data)])
 
 # ========================= AUTH ENDPOINTS =========================
 
@@ -243,7 +272,7 @@ async def update_profile(profile: UserProfile, current_user: dict = Depends(get_
         update_data["username"] = profile.username.lower()
     
     if profile.profile_pic is not None:
-        update_data["profile_pic"] = profile.profile_pic
+        update_data["profile_pic"] = upload_image(profile.profile_pic, prefix=f"profile/{current_user['id']}")
     
     if update_data:
         await db.users.update_one(
@@ -265,19 +294,22 @@ async def update_profile(profile: UserProfile, current_user: dict = Depends(get_
 
 @api_router.post("/posts")
 async def create_post(post_data: PostCreate, current_user: dict = Depends(get_current_user)):
+    image_url = upload_image(post_data.image, prefix=f"posts/{current_user['id']}")
+
     post = {
         "id": str(uuid.uuid4()),
         "user_id": current_user["id"],
-        "image": post_data.image,
+        "image": image_url,
         "caption": post_data.caption or "",
         "created_at": datetime.utcnow()
     }
     
     await db.posts.insert_one(post)
-    
+
     # Update streaks with all friends
     await update_streaks_for_user(current_user["id"])
-    
+    await notify_friends_of_post(current_user)
+
     return PostResponse(
         id=post["id"],
         user_id=post["user_id"],
@@ -285,8 +317,25 @@ async def create_post(post_data: PostCreate, current_user: dict = Depends(get_cu
         profile_pic=current_user.get("profile_pic"),
         image=post["image"],
         caption=post["caption"],
-        created_at=post["created_at"]
+        created_at=post["created_at"],
+        reaction_counts={},
+        my_reaction=None
     )
+
+async def get_reactions_summary(post_ids: List[str], viewer_id: str) -> dict:
+    """Returns {post_id: {"counts": {emoji: n}, "my_reaction": str|None}} for the given posts."""
+    summary = {pid: {"counts": {}, "my_reaction": None} for pid in post_ids}
+    if not post_ids:
+        return summary
+
+    reactions = await db.reactions.find({"post_id": {"$in": post_ids}}).to_list(10000)
+    for r in reactions:
+        entry = summary[r["post_id"]]
+        entry["counts"][r["emoji"]] = entry["counts"].get(r["emoji"], 0) + 1
+        if r["user_id"] == viewer_id:
+            entry["my_reaction"] = r["emoji"]
+
+    return summary
 
 @api_router.get("/posts/feed")
 async def get_feed(current_user: dict = Depends(get_current_user)):
@@ -315,10 +364,13 @@ async def get_feed(current_user: dict = Depends(get_current_user)):
     }).sort("created_at", -1).to_list(100)
     
     # Get user details for posts
+    reactions_by_post = await get_reactions_summary([p["id"] for p in posts], current_user["id"])
+
     result = []
     for post in posts:
         user = await db.users.find_one({"id": post["user_id"]})
         if user:
+            reactions = reactions_by_post[post["id"]]
             result.append(PostResponse(
                 id=post["id"],
                 user_id=post["user_id"],
@@ -326,9 +378,11 @@ async def get_feed(current_user: dict = Depends(get_current_user)):
                 profile_pic=user.get("profile_pic"),
                 image=post["image"],
                 caption=post["caption"],
-                created_at=post["created_at"]
+                created_at=post["created_at"],
+                reaction_counts=reactions["counts"],
+                my_reaction=reactions["my_reaction"]
             ))
-    
+
     return result
 
 @api_router.get("/posts/my")
@@ -336,7 +390,9 @@ async def get_my_posts(current_user: dict = Depends(get_current_user)):
     posts = await db.posts.find({
         "user_id": current_user["id"]
     }).sort("created_at", -1).to_list(100)
-    
+
+    reactions_by_post = await get_reactions_summary([p["id"] for p in posts], current_user["id"])
+
     return [PostResponse(
         id=post["id"],
         user_id=post["user_id"],
@@ -344,8 +400,74 @@ async def get_my_posts(current_user: dict = Depends(get_current_user)):
         profile_pic=current_user.get("profile_pic"),
         image=post["image"],
         caption=post["caption"],
-        created_at=post["created_at"]
+        created_at=post["created_at"],
+        reaction_counts=reactions_by_post[post["id"]]["counts"],
+        my_reaction=reactions_by_post[post["id"]]["my_reaction"]
     ) for post in posts]
+
+@api_router.post("/posts/{post_id}/react")
+async def react_to_post(post_id: str, reaction: ReactionCreate, current_user: dict = Depends(get_current_user)):
+    if reaction.emoji not in ALLOWED_REACTIONS:
+        raise HTTPException(status_code=400, detail="Unsupported reaction")
+
+    post = await db.posts.find_one({"id": post_id})
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    await db.reactions.update_one(
+        {"post_id": post_id, "user_id": current_user["id"]},
+        {"$set": {
+            "post_id": post_id,
+            "user_id": current_user["id"],
+            "emoji": reaction.emoji,
+            "created_at": datetime.utcnow()
+        }},
+        upsert=True
+    )
+
+    if post["user_id"] != current_user["id"]:
+        await notify_user(
+            post["user_id"], "friend_posts",
+            "GymBuddy",
+            f"@{current_user['username']} reacted {reaction.emoji} to your check-in",
+            {"type": "post_reaction", "post_id": post_id}
+        )
+
+    summary = await get_reactions_summary([post_id], current_user["id"])
+    return summary[post_id]
+
+@api_router.delete("/posts/{post_id}/react")
+async def remove_reaction(post_id: str, current_user: dict = Depends(get_current_user)):
+    await db.reactions.delete_one({"post_id": post_id, "user_id": current_user["id"]})
+    summary = await get_reactions_summary([post_id], current_user["id"])
+    return summary[post_id]
+
+async def notify_friends_of_post(poster: dict):
+    """Ping every accepted friend (who has friend_posts notifications on) that poster just checked in."""
+    friendships = await db.friendships.find({
+        "$or": [
+            {"user1_id": poster["id"], "status": "accepted"},
+            {"user2_id": poster["id"], "status": "accepted"}
+        ]
+    }).to_list(1000)
+
+    messages = []
+    for f in friendships:
+        friend_id = f["user2_id"] if f["user1_id"] == poster["id"] else f["user1_id"]
+        friend = await db.users.find_one({"id": friend_id})
+        if not friend or not friend.get("push_token"):
+            continue
+        if not await get_notification_pref(friend_id, "friend_posts"):
+            continue
+        messages.append(build_message(
+            friend["push_token"],
+            "GymBuddy",
+            f"@{poster['username']} just checked in 💪",
+            {"type": "friend_post", "user_id": poster["id"]}
+        ))
+
+    if messages:
+        await send_push_notifications(messages)
 
 # ========================= FRIENDS ENDPOINTS =========================
 
@@ -384,7 +506,14 @@ async def send_friend_request(request: FriendRequest, current_user: dict = Depen
     }
     
     await db.friendships.insert_one(friendship)
-    
+
+    await notify_user(
+        friend["id"], "friend_requests",
+        "GymBuddy",
+        f"@{current_user['username']} sent you a friend request",
+        {"type": "friend_request", "friendship_id": friendship["id"]}
+    )
+
     return {"message": "Friend request sent", "friendship_id": friendship["id"]}
 
 @api_router.get("/friends/search/{query}")
@@ -487,7 +616,14 @@ async def accept_friend_request(friendship_id: str, current_user: dict = Depends
         {"id": friendship_id},
         {"$set": {"status": "accepted"}}
     )
-    
+
+    await notify_user(
+        friendship["user1_id"], "friend_requests",
+        "GymBuddy",
+        f"@{current_user['username']} accepted your friend request",
+        {"type": "friend_request_accepted", "friendship_id": friendship_id}
+    )
+
     return {"message": "Friend request accepted"}
 
 @api_router.post("/friends/decline/{friendship_id}")
@@ -633,6 +769,63 @@ async def get_streaks(current_user: dict = Depends(get_current_user)):
             })
     
     return result
+
+async def send_streak_warnings():
+    """Warn both friends when a streak has exactly one day left and one of them hasn't posted today."""
+    today = datetime.utcnow().date()
+    friendships = await db.friendships.find({
+        "status": "accepted",
+        "streak_count": {"$gt": 0}
+    }).to_list(10000)
+
+    for f in friendships:
+        last_mutual = f.get("last_mutual_post")
+        if not last_mutual:
+            continue
+        last_mutual_date = last_mutual.date() if isinstance(last_mutual, datetime) else last_mutual
+        days_diff = (today - last_mutual_date).days
+
+        # days_remaining = 3 - days_diff (see /streaks) - warn with exactly 1 day left
+        if days_diff != 2:
+            continue
+        if f.get("last_streak_warning_date") == today.isoformat():
+            continue  # already warned today
+
+        user1 = await db.users.find_one({"id": f["user1_id"]})
+        user2 = await db.users.find_one({"id": f["user2_id"]})
+        if not user1 or not user2:
+            continue
+
+        for user, other in [(user1, user2), (user2, user1)]:
+            posted_today = await db.posts.find_one({
+                "user_id": user["id"],
+                "created_at": {
+                    "$gte": datetime.combine(today, datetime.min.time()),
+                    "$lt": datetime.combine(today + timedelta(days=1), datetime.min.time())
+                }
+            }) is not None
+            if posted_today:
+                continue
+            await notify_user(
+                user["id"], "streak_warnings",
+                "Streak about to expire! 🔥",
+                f"Post today to keep your {f['streak_count']}-day streak with @{other['username']} alive",
+                {"type": "streak_warning", "friendship_id": f["id"]}
+            )
+
+        await db.friendships.update_one(
+            {"id": f["id"]},
+            {"$set": {"last_streak_warning_date": today.isoformat()}}
+        )
+
+async def streak_warning_scheduler():
+    """Sweep for at-risk streaks on startup, then every 6 hours."""
+    while True:
+        try:
+            await send_streak_warnings()
+        except Exception as exc:
+            logger.warning(f"Streak warning sweep failed: {exc}")
+        await asyncio.sleep(6 * 60 * 60)
 
 # ========================= WORKOUTS ENDPOINTS =========================
 
@@ -922,6 +1115,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def start_background_tasks():
+    asyncio.create_task(streak_warning_scheduler())
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

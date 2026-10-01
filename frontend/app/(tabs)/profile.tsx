@@ -17,13 +17,15 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
+import Constants from 'expo-constants';
 import { useAuth } from '../../src/contexts/AuthContext';
 import { profileApi, notificationsApi } from '../../src/services/api';
 
 // Configure notifications
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
   }),
@@ -151,10 +153,17 @@ export default function ProfileScreen() {
       return;
     }
 
+    const projectId = Constants.expoConfig?.extra?.eas?.projectId ?? Constants.easConfig?.projectId;
+    if (!projectId) {
+      Alert.alert(
+        'Setup Needed',
+        'This app is not linked to an EAS project yet, so it cannot generate a push token. Run `eas init` and rebuild.'
+      );
+      return;
+    }
+
     try {
-      const token = await Notifications.getExpoPushTokenAsync({
-        projectId: 'gymbuddy', // This should match your expo project
-      });
+      const token = await Notifications.getExpoPushTokenAsync({ projectId });
       await notificationsApi.registerToken(token.data);
       setPushEnabled(true);
       Alert.alert('Success', 'Push notifications enabled!');

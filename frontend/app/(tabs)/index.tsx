@@ -23,7 +23,11 @@ interface Post {
   image: string;
   caption: string;
   created_at: string;
+  reaction_counts: Record<string, number>;
+  my_reaction: string | null;
 }
+
+const REACTION_EMOJIS = ['🔥', '💪', '👏', '😮'];
 
 export default function FeedScreen() {
   const [posts, setPosts] = useState<Post[]>([]);
@@ -53,6 +57,37 @@ export default function FeedScreen() {
   const onRefresh = () => {
     setRefreshing(true);
     loadPosts();
+  };
+
+  const handleReact = async (post: Post, emoji: string) => {
+    const isRemoving = post.my_reaction === emoji;
+
+    // Optimistic update
+    setPosts((prev) =>
+      prev.map((p) => {
+        if (p.id !== post.id) return p;
+        const counts = { ...p.reaction_counts };
+        if (p.my_reaction) {
+          counts[p.my_reaction] = Math.max(0, (counts[p.my_reaction] || 1) - 1);
+          if (counts[p.my_reaction] === 0) delete counts[p.my_reaction];
+        }
+        if (!isRemoving) {
+          counts[emoji] = (counts[emoji] || 0) + 1;
+        }
+        return { ...p, reaction_counts: counts, my_reaction: isRemoving ? null : emoji };
+      })
+    );
+
+    try {
+      if (isRemoving) {
+        await postsApi.removeReaction(post.id);
+      } else {
+        await postsApi.react(post.id, emoji);
+      }
+    } catch (error) {
+      console.log('Reaction error:', error);
+      loadPosts(); // revert to server state
+    }
   };
 
   const formatTime = (dateString: string) => {
@@ -102,6 +137,27 @@ export default function FeedScreen() {
           <Ionicons name="fitness" size={20} color="#FF6B35" />
           <Text style={styles.checkedInText}>Checked in at the gym</Text>
         </View>
+      </View>
+
+      <View style={styles.reactionRow}>
+        {REACTION_EMOJIS.map((emoji) => {
+          const count = item.reaction_counts?.[emoji] || 0;
+          const isMine = item.my_reaction === emoji;
+          return (
+            <TouchableOpacity
+              key={emoji}
+              style={[styles.reactionButton, isMine && styles.reactionButtonActive]}
+              onPress={() => handleReact(item, emoji)}
+            >
+              <Text style={styles.reactionEmoji}>{emoji}</Text>
+              {count > 0 && (
+                <Text style={[styles.reactionCount, isMine && styles.reactionCountActive]}>
+                  {count}
+                </Text>
+              )}
+            </TouchableOpacity>
+          );
+        })}
       </View>
     </View>
   );
@@ -249,6 +305,35 @@ const styles = StyleSheet.create({
     color: '#888',
     fontSize: 14,
     marginLeft: 8,
+  },
+  reactionRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    gap: 8,
+  },
+  reactionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2a2a2a',
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  reactionButtonActive: {
+    backgroundColor: '#FF6B35',
+  },
+  reactionEmoji: {
+    fontSize: 16,
+  },
+  reactionCount: {
+    color: '#aaa',
+    fontSize: 13,
+    marginLeft: 4,
+    fontWeight: '600',
+  },
+  reactionCountActive: {
+    color: '#fff',
   },
   emptyState: {
     flex: 1,
