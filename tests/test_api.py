@@ -1,9 +1,9 @@
-"""API tests, run against a live server so they exercise the real stack (FastAPI + MongoDB + uploads).
+"""API tests, run against a live server so they exercise the real stack (FastAPI + MongoDB).
 
-The tests create accounts and posts, so point them at a throwaway database and upload folder:
+The tests create accounts and posts, so point them at a throwaway database:
 
     cd backend
-    DB_NAME=gymbuddy_test UPLOAD_DIR=../.test-uploads python -m uvicorn server:app --port 8001
+    DB_NAME=gymbuddy_test python -m uvicorn server:app --port 8001
     GYMBUDDY_API_URL=http://127.0.0.1:8001 python -m pytest tests -q
 
 They're skipped automatically if no server is reachable.
@@ -92,10 +92,12 @@ def test_check_in_is_saved_and_persists(client):
     assert post.status_code == 200, post.text
 
     image = post.json()["image"]
-    assert image.startswith("/uploads/") or image.startswith("http")
-    if image.startswith("/uploads/"):
+    assert image.startswith("/api/media/") or image.startswith("http")
+    if image.startswith("/api/media/"):
         served = httpx.get(f"{BASE}{image}")
-        assert served.status_code == 200 and served.headers["content-type"].startswith("image/")
+        assert served.status_code == 200 and served.headers["content-type"] == "image/jpeg"
+        assert "immutable" in served.headers["cache-control"]
+    assert httpx.get(f"{BASE}/api/media/{uuid.uuid4()}").status_code == 404
 
     feed = client.get("/posts/feed", headers=user["headers"]).json()
     mine = client.get("/posts/my", headers=user["headers"]).json()
@@ -112,6 +114,17 @@ def test_image_validation(client):
     assert check_in(client, user, image="data:image/jpeg;base64,bm90IGFuIGltYWdl").status_code == 400
     assert check_in(client, user, image="just text").status_code == 400
     assert client.put("/auth/profile", headers=user["headers"], json={"profile_pic": JPEG}).status_code == 200
+
+
+def test_replacing_profile_photo_removes_the_old_one(client):
+    user = make_user(client)
+    first = client.put("/auth/profile", headers=user["headers"], json={"profile_pic": JPEG}).json()["profile_pic"]
+    second = client.put("/auth/profile", headers=user["headers"], json={"profile_pic": f"data:image/png;base64,{PNG}"})
+    second = second.json()["profile_pic"]
+    assert first != second
+    if second.startswith("/api/media/"):
+        assert httpx.get(f"{BASE}{second}").headers["content-type"] == "image/png"
+        assert httpx.get(f"{BASE}{first}").status_code == 404  # no orphaned photos piling up
 
 
 def test_posts_are_private_to_friends(client):

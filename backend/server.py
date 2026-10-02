@@ -1,7 +1,6 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.cors import CORSMiddleware
@@ -26,7 +25,19 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 from push import send_push_notifications, build_message
-from storage import upload_image, UPLOAD_DIR
+from storage import (
+    save_image, delete_media, put_media, detect_type, MEDIA_URL_PREFIX, LEGACY_UPLOAD_DIR, LEGACY_URL_PREFIX,
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development').lower()
+IS_PRODUCTION = ENVIRONMENT == 'production'
 
 def utcnow() -> datetime:
     """Timezone-aware, so API timestamps carry a UTC marker and clients don't misread them as local time."""
@@ -38,8 +49,16 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000, tz_aware=True)
 db = client[os.environ.get('DB_NAME', 'gymbuddy_db')]
 
-# JWT Configuration
-JWT_SECRET = os.environ.get('JWT_SECRET', 'gymbuddy_secret_key_2025')
+# JWT Configuration. Anyone who knows the secret can forge a login for any account, so a deployed
+# server (ENVIRONMENT=production) refuses to start without a long random one. Local development
+# falls back to a built-in key so a fresh clone still runs.
+DEV_JWT_SECRET = 'gymbuddy_secret_key_2025'
+JWT_SECRET = os.environ.get('JWT_SECRET', '')
+if IS_PRODUCTION and (len(JWT_SECRET) < 32 or JWT_SECRET in (DEV_JWT_SECRET, 'change-me-to-a-long-random-value')):
+    raise RuntimeError("Set JWT_SECRET to a long random value (32+ characters) when ENVIRONMENT=production")
+if not JWT_SECRET:
+    JWT_SECRET = DEV_JWT_SECRET
+    logger.warning("JWT_SECRET is not set - using the built-in development key. Set one in backend/.env.")
 JWT_ALGORITHM = 'HS256'
 JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
 
@@ -60,16 +79,6 @@ app = FastAPI()
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Locally stored images (used whenever S3 isn't configured) are served from here.
-app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 @app.exception_handler(ConnectionFailure)
 async def database_error_handler(request: Request, exc: ConnectionFailure):
@@ -323,9 +332,7 @@ async def update_profile(profile: UserProfile, current_user: dict = Depends(get_
         update_data["username"] = new_username
 
     if profile.profile_pic is not None:
-        update_data["profile_pic"] = await run_in_threadpool(
-            upload_image, profile.profile_pic, f"profile/{current_user['id']}"
-        )
+        update_data["profile_pic"] = await save_image(db, profile.profile_pic, f"profile/{current_user['id']}")
 
     if update_data:
         try:
@@ -334,7 +341,11 @@ async def update_profile(profile: UserProfile, current_user: dict = Depends(get_
                 {"$set": update_data}
             )
         except DuplicateKeyError:
+            if "profile_pic" in update_data:
+                await delete_media(db, update_data["profile_pic"])  # don't leave the new photo orphaned
             raise HTTPException(status_code=400, detail="Username already taken")
+        if "profile_pic" in update_data:
+            await delete_media(db, current_user.get("profile_pic"))  # the photo this one replaces
     
     updated_user = await db.users.find_one({"id": current_user["id"]})
     return UserResponse(
@@ -350,7 +361,7 @@ async def update_profile(profile: UserProfile, current_user: dict = Depends(get_
 
 @api_router.post("/posts")
 async def create_post(post_data: PostCreate, current_user: dict = Depends(get_current_user)):
-    image_url = await run_in_threadpool(upload_image, post_data.image, f"posts/{current_user['id']}")
+    image_url = await save_image(db, post_data.image, f"posts/{current_user['id']}")
 
     post = {
         "id": str(uuid.uuid4()),
@@ -983,6 +994,19 @@ async def delete_workout(workout_id: str, current_user: dict = Depends(get_curre
 async def root():
     return {"message": "GymBuddy API v1.0"}
 
+@api_router.get("/media/{media_id}")
+async def get_media(media_id: str):
+    # Public on purpose: <img> tags can't send an Authorization header. The id is an unguessable
+    # UUID, which is the same protection a public S3 URL gives. Photos never change, so cache hard.
+    item = await db.media.find_one({"id": media_id})
+    if not item:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return Response(
+        content=bytes(item["data"]),
+        media_type=item["content_type"],
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
 @api_router.get("/health")
 async def health_check():
     try:
@@ -1170,10 +1194,16 @@ async def update_notification_settings(settings: NotificationSettings, current_u
 # Include the router in the main app
 app.include_router(api_router)
 
+# Which websites may call this API from a browser. Comma-separated, e.g. "https://gymlock.vercel.app".
+# Defaults to any site for local development; set it on a deployed server. The app authenticates with
+# a Bearer token (not cookies), so credentialed CORS isn't needed.
+cors_origins = [o.strip().rstrip('/') for o in os.environ.get('CORS_ORIGINS', '*').split(',') if o.strip()]
+if IS_PRODUCTION and '*' in cors_origins:
+    logger.warning("CORS_ORIGINS is not set - any website can call this API. Set it to your app's URL.")
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=["*"],
+    allow_credentials=False,
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1201,6 +1231,7 @@ async def ensure_indexes():
         (db.reactions, [("post_id", 1), ("user_id", 1)], {"unique": True}),
         (db.workouts, [("user_id", 1), ("created_at", -1)], {}),
         (db.notification_settings, [("user_id", 1)], {"unique": True}),
+        (db.media, [("id", 1)], {"unique": True}),
     ]
     for collection, keys, options in specs:
         try:
@@ -1208,9 +1239,32 @@ async def ensure_indexes():
         except Exception as exc:
             logger.warning(f"Could not create index {keys} on {collection.name}: {exc}")
 
+async def migrate_local_uploads():
+    """Move photos saved as files by earlier versions into the database, so all data lives in one place.
+
+    Safe to run on every start: it only touches records still pointing at /uploads/..., and the original
+    files are left on disk. Never raises.
+    """
+    try:
+        root = LEGACY_UPLOAD_DIR.resolve()
+        for collection, field in ((db.posts, "image"), (db.users, "profile_pic")):
+            async for doc in collection.find({field: {"$regex": f"^{re.escape(LEGACY_URL_PREFIX)}"}}, {field: 1}):
+                path = (LEGACY_UPLOAD_DIR / doc[field][len(LEGACY_URL_PREFIX):]).resolve()
+                data = path.read_bytes() if path.is_file() and root in path.parents else b""
+                detected = detect_type(data)
+                if not detected:
+                    logger.warning(f"Could not migrate {doc[field]}: file is missing or not a supported image")
+                    continue
+                url = await put_media(db, data, detected[0])
+                await collection.update_one({"_id": doc["_id"]}, {"$set": {field: url}})
+                logger.info(f"Moved {doc[field]} into the database as {url}")
+    except Exception as exc:
+        logger.warning(f"Photo migration failed (will retry on next start): {exc}")
+
 @app.on_event("startup")
 async def start_background_tasks():
     await ensure_indexes()
+    await migrate_local_uploads()
     asyncio.create_task(streak_warning_scheduler())
 
 @app.on_event("shutdown")

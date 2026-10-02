@@ -11,7 +11,7 @@ A social fitness accountability app, inspired by Locket and Snapchat: friends sh
 | Area | What's implemented |
 |---|---|
 | **Authentication** | Email/password (bcrypt), JWT access tokens (7-day expiry), auto-generated 6-character friend codes |
-| **Check-ins** | Camera or gallery photo, optional caption; photos are saved on disk (or in S3-compatible storage if configured) |
+| **Check-ins** | Camera or gallery photo, optional caption; photos are stored in the database (or in S3-compatible storage if configured) |
 | **Friends** | Add by friend code or username search, QR code display/scan (mobile), request/accept/decline, remove |
 | **Streaks** | Starts when both friends post the same day; stays alive as long as both post within 3 days; shows days remaining |
 | **Reactions** | Tap to react to a check-in with 🔥 💪 👏 😮; counts and your own reaction shown per post |
@@ -26,8 +26,8 @@ A social fitness accountability app, inspired by Locket and Snapchat: friends sh
 backend/
   server.py            FastAPI app: auth, posts, friends, streaks, workouts, stats, notification settings
   push.py              Sends notifications through Expo's push API
-  storage.py           Saves check-in/profile images (local disk by default, S3 if configured)
-  requirements.txt
+  storage.py           Saves check-in/profile images (in the database by default, S3 if configured)
+  requirements.txt     What the API needs to run (requirements-dev.txt adds test/lint tools)
   .env.example         Required environment variables
 
 frontend/
@@ -52,15 +52,15 @@ pip install -r requirements.txt
 uvicorn server:app --reload --port 8000
 ```
 
-**Where your data lives.** Accounts, check-ins, friends, streaks and workouts are stored in MongoDB, so they survive restarts of the app and the API as long as MongoDB keeps running with the same data folder. Check-in and profile photos are saved on disk in `backend/uploads/` (served by the API at `/uploads`), so that folder is part of your data too.
+**Where your data lives.** Everything is stored in MongoDB: accounts, check-ins, friends, streaks, workouts and the photos themselves (served by the API at `/api/media/<id>`). It survives restarts of the app and the API as long as MongoDB keeps running with the same data folder, and backing up or moving the database moves all of it. (Earlier versions saved photos as files in `backend/uploads/`; any found there are moved into the database automatically on startup.)
 
 **Optional: S3 for photos.** To store photos in S3-compatible storage instead (AWS S3, Cloudflare R2, DigitalOcean Spaces, or MinIO all work via `boto3`), fill in the `AWS_S3_*` variables from `.env.example`. The bucket needs a policy allowing public `GetObject`, since photos are loaded by URL.
 
-**Tests.** The API tests run against a live server and create accounts and posts, so use a throwaway database and upload folder:
+**Tests.** The API tests run against a live server and create accounts and posts, so use a throwaway database (`pip install -r requirements-dev.txt` first):
 
 ```bash
 cd backend
-DB_NAME=gymbuddy_test UPLOAD_DIR=../.test-uploads uvicorn server:app --port 8001
+DB_NAME=gymbuddy_test uvicorn server:app --port 8001
 # in a second terminal, from the repo root:
 GYMBUDDY_API_URL=http://127.0.0.1:8001 python -m pytest tests -q
 ```
@@ -85,6 +85,10 @@ eas init
 
 (requires a free Expo account). Camera, friend QR scanning, and push notifications only work on iOS/Android — the web build runs everything else (feed, reactions, friends, streaks, stats, profile) against the same backend.
 
+## Deploying
+
+To put GymBuddy online for free (MongoDB Atlas + Render + Vercel), follow [DEPLOY.md](DEPLOY.md). The repo already contains the Render blueprint (`render.yaml`) and Vercel config (`frontend/vercel.json`). A deployed server (`ENVIRONMENT=production`) refuses to start without a strong `JWT_SECRET`, and `CORS_ORIGINS` limits which websites can call the API.
+
 ## API overview
 
 All routes are under `/api`.
@@ -103,12 +107,12 @@ All routes are under `/api`.
 | `GET /stats` | Check-in counts, streaks, consistency %, charts data |
 | `POST /notifications/register` · `DELETE /notifications/unregister` | Register/remove an Expo push token |
 | `GET /notifications/settings` · `PUT /notifications/settings` | Per-category notification toggles |
-| `GET /health` | Health check |
+| `GET /media/{id}` | A stored photo (public link, unguessable id) |
+| `GET /health` | Health check, including whether the database is reachable |
 
 ## Known gaps
 
 - No refresh tokens — a single 7-day JWT with no revocation path
-- No rate limiting
-- CORS currently allows all origins
+- No rate limiting (login attempts aren't throttled)
 - "Today" for streaks and stats is a UTC day, so an evening check-in in a timezone behind UTC can count toward the next day
 - Web builds can't use the camera for QR scanning or receive push notifications (mobile only)

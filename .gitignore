@@ -91,6 +91,5 @@ credentials.json
 .credentials
 .metro-cache/
 
-# User-uploaded images saved locally when S3 is not configured
+# Photos saved as files by earlier versions (now moved into the database on startup)
 backend/uploads/
-.test-uploads/

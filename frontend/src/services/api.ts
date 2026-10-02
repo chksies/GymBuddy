@@ -24,13 +24,13 @@ export function setUnauthorizedHandler(handler: (() => void) | null) {
   onUnauthorized = handler;
 }
 
-// The backend stores images it saves itself as relative "/uploads/..." paths so they keep working
+// The backend stores photos it keeps itself as relative "/api/media/..." paths so they keep working
 // from any host. Resolve them against the API we're actually talking to.
 const MEDIA_KEYS = new Set(['image', 'profile_pic', 'friend_profile_pic', 'requester_profile_pic']);
 
 function resolveMediaUrls(value: any, key?: string): any {
   if (typeof value === 'string') {
-    return key && MEDIA_KEYS.has(key) && value.startsWith('/uploads/') ? `${API_URL}${value}` : value;
+    return key && MEDIA_KEYS.has(key) && value.startsWith('/api/media/') ? `${API_URL}${value}` : value;
   }
   if (Array.isArray(value)) return value.map((item) => resolveMediaUrls(item, key));
   if (value && typeof value === 'object') {
@@ -59,7 +59,8 @@ export function getErrorMessage(error: any, fallback: string): string {
 
 const api = axios.create({
   baseURL: `${API_URL}/api`,
-  timeout: 20000,
+  // Generous because a free-tier host that has gone to sleep can take about a minute to wake up
+  timeout: 45000,
 });
 
 // Add auth token to requests
@@ -93,6 +94,8 @@ export const authApi = {
   register: (email: string, password: string, username: string) =>
     api.post('/auth/register', { email, password, username }),
   me: () => api.get('/auth/me'),
+  // Fire-and-forget: wakes a sleeping server while the user is still typing their login
+  wakeServer: () => api.get('/health', { timeout: 90000 }).catch(() => undefined),
 };
 
 // Posts API
