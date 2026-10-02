@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,7 +11,9 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { streaksApi } from '../../src/services/api';
+import { streaksApi, getErrorMessage } from '../../src/services/api';
+import { useDialog } from '../../src/components/DialogProvider';
+import ErrorState from '../../src/components/ErrorState';
 
 interface Streak {
   friendship_id: string;
@@ -30,14 +32,23 @@ export default function StreaksScreen() {
   const [streaks, setStreaks] = useState<Streak[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const hasStreaksRef = useRef(false);
   const insets = useSafeAreaInsets();
+  const dialog = useDialog();
 
   const loadStreaks = async () => {
     try {
       const response = await streaksApi.getStreaks();
       setStreaks(response.data);
+      hasStreaksRef.current = response.data.length > 0;
+      setLoadError(null);
     } catch (error) {
       console.log('Error loading streaks:', error);
+      const message = getErrorMessage(error, "Couldn't load your streaks.");
+      setLoadError(message);
+      // With nothing on screen the error state says it all; otherwise keep what we have
+      if (hasStreaksRef.current) dialog.toast(message, 'error');
     } finally {
       setIsLoading(false);
       setRefreshing(false);
@@ -52,6 +63,11 @@ export default function StreaksScreen() {
 
   const onRefresh = () => {
     setRefreshing(true);
+    loadStreaks();
+  };
+
+  const retry = () => {
+    setIsLoading(true);
     loadStreaks();
   };
 
@@ -121,6 +137,10 @@ export default function StreaksScreen() {
         <ActivityIndicator size="large" color="#FF6B35" />
       </View>
     );
+  }
+
+  if (loadError && streaks.length === 0) {
+    return <ErrorState message={loadError} onRetry={retry} />;
   }
 
   return (

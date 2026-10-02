@@ -1,35 +1,6 @@
 //used react here to store info of user
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import * as SecureStore from 'expo-secure-store';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import axios from 'axios';
-import { Platform } from 'react-native';
-
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
-
-// Platform-aware storage helper
-const storage = {
-  async getItem(key: string): Promise<string | null> {
-    if (Platform.OS === 'web') {
-      return AsyncStorage.getItem(key);
-    }
-    return SecureStore.getItemAsync(key);
-  },
-  async setItem(key: string, value: string): Promise<void> {
-    if (Platform.OS === 'web') {
-      await AsyncStorage.setItem(key, value);
-    } else {
-      await SecureStore.setItemAsync(key, value);
-    }
-  },
-  async deleteItem(key: string): Promise<void> {
-    if (Platform.OS === 'web') {
-      await AsyncStorage.removeItem(key);
-    } else {
-      await SecureStore.deleteItemAsync(key);
-    }
-  },
-};
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { authApi, notificationsApi, setUnauthorizedHandler, tokenStorage } from '../services/api';
 
 interface User {
   id: string;
@@ -44,75 +15,99 @@ interface AuthContextType {
   user: User | null;
   token: string | null;
   isLoading: boolean;
+  /** A saved login exists but the server couldn't be reached, so we couldn't confirm it. */
+  serverUnreachable: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, username: string) => Promise<void>;
   logout: () => Promise<void>;
   updateUser: (user: User) => void;
+  retryConnection: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [serverUnreachable, setServerUnreachable] = useState(false);
 
-  useEffect(() => {
-    loadStoredAuth();
+  const clearSession = useCallback(async () => {
+    try {
+      await tokenStorage.remove();
+    } catch (e) {
+      // Nothing more we can do if storage fails
+    }
+    setToken(null);
+    setUser(null);
   }, []);
 
-  const loadStoredAuth = async () => {
+  const loadStoredAuth = useCallback(async () => {
+    setIsLoading(true);
+    setServerUnreachable(false);
     try {
-      const storedToken = await storage.getItem('auth_token');
-      if (storedToken) {
-        setToken(storedToken);
-        // Verify token and get user data
-        const response = await axios.get(`${API_URL}/api/auth/me`, {
-          headers: { Authorization: `Bearer ${storedToken}` }
-        });
-        setUser(response.data);
+      const storedToken = await tokenStorage.get();
+      if (!storedToken) return;
+      setToken(storedToken);
+
+      // Only a 401 means the saved login is bad. A flaky connection or a backend that is still
+      // starting up must never log the user out, so retry a few times before giving up.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const response = await authApi.me();
+          setUser(response.data);
+          return;
+        } catch (error: any) {
+          if (error?.response?.status === 401) {
+            await clearSession();
+            return;
+          }
+          if (attempt < 2) await sleep(1500);
+        }
       }
-    } catch (error) {
-      console.log('Auth load error:', error);
-      try {
-        await storage.deleteItem('auth_token');
-      } catch (e) {
-        // Ignore delete errors
-      }
+      // Keep the saved login: it's probably still valid and we just couldn't reach the server
+      setServerUnreachable(true);
     } finally {
       setIsLoading(false);
     }
+  }, [clearSession]);
+
+  useEffect(() => {
+    // If any request later finds the login has expired, go back to the sign-in screen
+    setUnauthorizedHandler(() => {
+      clearSession();
+    });
+    loadStoredAuth();
+    return () => setUnauthorizedHandler(null);
+  }, [clearSession, loadStoredAuth]);
+
+  const startSession = async (newToken: string, userData: User) => {
+    await tokenStorage.set(newToken);
+    setToken(newToken);
+    setUser(userData);
+    setServerUnreachable(false);
   };
 
   const login = async (email: string, password: string) => {
-    const response = await axios.post(`${API_URL}/api/auth/login`, {
-      email,
-      password
-    });
-    
-    const { token: newToken, user: userData } = response.data;
-    await storage.setItem('auth_token', newToken);
-    setToken(newToken);
-    setUser(userData);
+    const response = await authApi.login(email.trim(), password);
+    await startSession(response.data.token, response.data.user);
   };
 
   const register = async (email: string, password: string, username: string) => {
-    const response = await axios.post(`${API_URL}/api/auth/register`, {
-      email,
-      password,
-      username
-    });
-    
-    const { token: newToken, user: userData } = response.data;
-    await storage.setItem('auth_token', newToken);
-    setToken(newToken);
-    setUser(userData);
+    const response = await authApi.register(email.trim(), password, username.trim());
+    await startSession(response.data.token, response.data.user);
   };
 
   const logout = async () => {
-    await storage.deleteItem('auth_token');
-    setToken(null);
-    setUser(null);
+    // Stop this account's push notifications from reaching a device someone else may sign in on
+    try {
+      await notificationsApi.unregisterToken();
+    } catch (e) {
+      // Offline or already signed out - logging out must still work
+    }
+    await clearSession();
   };
 
   const updateUser = (updatedUser: User) => {
@@ -120,7 +115,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, register, logout, updateUser }}>
+    <AuthContext.Provider
+      value={{ user, token, isLoading, serverUnreachable, login, register, logout, updateUser, retryConnection: loadStoredAuth }}
+    >
       {children}
     </AuthContext.Provider>
   );

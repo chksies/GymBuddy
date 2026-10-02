@@ -1,9 +1,17 @@
 import React from 'react';
-import { Tabs } from 'expo-router';
+import { Redirect, Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Platform } from 'react-native';
+import { useAuth } from '../../src/contexts/AuthContext';
 
 export default function TabsLayout() {
+  const { user, isLoading } = useAuth();
+
+  // Signed out (logout, or the login expired mid-session): leave the app screens
+  if (!isLoading && !user) {
+    return <Redirect href="/" />;
+  }
+
   return (
     <Tabs
       screenOptions={{

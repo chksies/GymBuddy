@@ -11,7 +11,9 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { statsApi } from '../../src/services/api';
+import { statsApi, getErrorMessage } from '../../src/services/api';
+import { useDialog } from '../../src/components/DialogProvider';
+import ErrorState from '../../src/components/ErrorState';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -33,14 +35,21 @@ export default function StatsScreen() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const insets = useSafeAreaInsets();
+  const dialog = useDialog();
 
   const loadStats = async () => {
     try {
       const response = await statsApi.getStats();
       setStats(response.data);
+      setLoadError(null);
     } catch (error) {
       console.log('Error loading stats:', error);
+      const message = getErrorMessage(error, "Couldn't load your stats.");
+      setLoadError(message);
+      // Without stats on screen the error state says it all; otherwise keep the old numbers
+      if (stats) dialog.toast(message, 'error');
     } finally {
       setIsLoading(false);
       setRefreshing(false);
@@ -55,6 +64,11 @@ export default function StatsScreen() {
 
   const onRefresh = () => {
     setRefreshing(true);
+    loadStats();
+  };
+
+  const retry = () => {
+    setIsLoading(true);
     loadStats();
   };
 
@@ -79,12 +93,7 @@ export default function StatsScreen() {
   }
 
   if (!stats) {
-    return (
-      <View style={[styles.container, styles.centered]}>
-        <Ionicons name="stats-chart-outline" size={64} color="#444" />
-        <Text style={styles.errorText}>Unable to load stats</Text>
-      </View>
-    );
+    return <ErrorState message={loadError ?? "Couldn't load your stats."} onRetry={retry} />;
   }
 
   const maxDayCount = getMaxBarValue(stats.checkins_by_day);

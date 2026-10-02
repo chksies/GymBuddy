@@ -5,7 +5,6 @@ import {
   StyleSheet,
   TouchableOpacity,
   Image,
-  Alert,
   ActivityIndicator,
   ScrollView,
   Switch,
@@ -19,7 +18,11 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import { useAuth } from '../../src/contexts/AuthContext';
-import { profileApi, notificationsApi } from '../../src/services/api';
+import { useDialog } from '../../src/components/DialogProvider';
+import { profileApi, notificationsApi, getErrorMessage } from '../../src/services/api';
+import { assetToDataUri, downscaleDataUri } from '../../src/utils/image';
+
+const APP_VERSION = Constants.expoConfig?.version ?? '1.0.0';
 
 // Configure notifications
 Notifications.setNotificationHandler({
@@ -50,6 +53,7 @@ export default function ProfileScreen() {
   const [pushEnabled, setPushEnabled] = useState(false);
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const dialog = useDialog();
 
   const loadNotificationSettings = async () => {
     try {
@@ -57,6 +61,8 @@ export default function ProfileScreen() {
       setNotifSettings(response.data);
     } catch (error) {
       console.log('Error loading notification settings:', error);
+      // Shown inside a modal, where a toast would be hidden behind it
+      dialog.alert('Notifications', getErrorMessage(error, "Couldn't load your notification settings."));
     }
   };
 
@@ -73,48 +79,72 @@ export default function ProfileScreen() {
     }, [])
   );
 
-  const handleLogout = () => {
-    Alert.alert(
-      'Logout',
-      'Are you sure you want to logout?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Logout',
-          style: 'destructive',
-          onPress: async () => {
-            await logout();
-            router.replace('/(auth)/login');
-          },
-        },
-      ]
-    );
+  const handleLogout = async () => {
+    const confirmed = await dialog.confirm({
+      title: 'Logout',
+      message: 'Are you sure you want to logout?',
+      confirmText: 'Logout',
+      destructive: true,
+    });
+    if (!confirmed) return;
+    await logout();
+    router.replace('/(auth)/login');
   };
 
   const handleChangePhoto = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.5,
-      base64: true,
-    });
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.5,
+        base64: true,
+      });
+      if (result.canceled) return;
 
-    if (!result.canceled && result.assets[0].base64) {
-      setIsUpdating(true);
-      try {
-        const response = await profileApi.updateProfile({
-          profile_pic: `data:image/jpeg;base64,${result.assets[0].base64}`,
-        });
-        updateUser(response.data);
-        Alert.alert('Success', 'Profile photo updated!');
-      } catch (error) {
-        Alert.alert('Error', 'Failed to update profile photo');
-      } finally {
-        setIsUpdating(false);
+      const dataUri = assetToDataUri(result.assets[0]);
+      if (!dataUri) {
+        dialog.toast("Couldn't read that photo. Try a different one.", 'error');
+        return;
       }
+
+      setIsUpdating(true);
+      const response = await profileApi.updateProfile({
+        profile_pic: await downscaleDataUri(dataUri, 800),
+      });
+      updateUser(response.data);
+      dialog.toast('Profile photo updated!', 'success');
+    } catch (error) {
+      console.log('Profile photo error:', error);
+      dialog.alert("Couldn't update your photo", getErrorMessage(error, 'Failed to update profile photo'));
+    } finally {
+      setIsUpdating(false);
     }
   };
+
+  const showPrivacyInfo = () =>
+    dialog.alert(
+      'Privacy',
+      'Your check-ins, workouts and streaks are only visible to you and the friends you accept. ' +
+        'Your email is never shown to other users. Anyone can find you by username to send a friend request, ' +
+        'but they only see your posts once you accept.'
+    );
+
+  const showHelpInfo = () =>
+    dialog.alert(
+      'Help & Support',
+      'Check In: tap the Check In tab, take or pick a photo and post it.\n\n' +
+        'Streaks: a streak starts when you and a friend both check in on the same day, and stays alive as long as ' +
+        'you both check in within 3 days of each other.\n\n' +
+        'Friends: add people from the Friends tab with their friend code, a QR code, or by searching their username.'
+    );
+
+  const showAboutInfo = () =>
+    dialog.alert(
+      'About GymBuddy',
+      `Version ${APP_VERSION}\n\nA social fitness accountability app: share gym check-ins with friends, ` +
+        'keep each other honest with streaks, and swap workouts.'
+    );
 
   const openNotificationSettings = async () => {
     setShowNotifModal(true);
@@ -131,45 +161,46 @@ export default function ProfileScreen() {
       console.log('Error updating setting:', error);
       // Revert on error
       setNotifSettings(prev => ({ ...prev, [key]: !value }));
+      dialog.alert('Notifications', getErrorMessage(error, "Couldn't save that setting."));
     }
   };
 
   const enablePushNotifications = async () => {
     if (Platform.OS === 'web') {
-      Alert.alert('Not Available', 'Push notifications are only available on mobile devices');
-      return;
-    }
-
-    const { status: existingStatus } = await Notifications.getPermissionsAsync();
-    let finalStatus = existingStatus;
-
-    if (existingStatus !== 'granted') {
-      const { status } = await Notifications.requestPermissionsAsync();
-      finalStatus = status;
-    }
-
-    if (finalStatus !== 'granted') {
-      Alert.alert('Permission Denied', 'Please enable notifications in your device settings');
-      return;
-    }
-
-    const projectId = Constants.expoConfig?.extra?.eas?.projectId ?? Constants.easConfig?.projectId;
-    if (!projectId) {
-      Alert.alert(
-        'Setup Needed',
-        'This app is not linked to an EAS project yet, so it cannot generate a push token. Run `eas init` and rebuild.'
-      );
+      dialog.alert('Not Available', 'Push notifications are only available on mobile devices');
       return;
     }
 
     try {
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus !== 'granted') {
+        dialog.alert('Permission Denied', 'Please enable notifications in your device settings');
+        return;
+      }
+
+      const projectId = Constants.expoConfig?.extra?.eas?.projectId ?? Constants.easConfig?.projectId;
+      if (!projectId) {
+        dialog.alert(
+          'Setup Needed',
+          'This app is not linked to an EAS project yet, so it cannot generate a push token. Run `eas init` and rebuild.'
+        );
+        return;
+      }
+
       const token = await Notifications.getExpoPushTokenAsync({ projectId });
       await notificationsApi.registerToken(token.data);
       setPushEnabled(true);
-      Alert.alert('Success', 'Push notifications enabled!');
+      dialog.alert('Push notifications enabled', "You'll now get notified about friend activity.");
     } catch (error) {
       console.log('Push token error:', error);
-      Alert.alert('Error', 'Failed to enable push notifications');
+      dialog.alert('Error', getErrorMessage(error, 'Failed to enable push notifications'));
     }
   };
 
@@ -177,9 +208,10 @@ export default function ProfileScreen() {
     try {
       await notificationsApi.unregisterToken();
       setPushEnabled(false);
-      Alert.alert('Success', 'Push notifications disabled');
+      dialog.alert('Push notifications disabled', "You won't get notifications on this device.");
     } catch (error) {
       console.log('Disable push error:', error);
+      dialog.alert('Notifications', getErrorMessage(error, "Couldn't turn off push notifications."));
     }
   };
 
@@ -237,7 +269,7 @@ export default function ProfileScreen() {
             </View>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={showPrivacyInfo}>
             <View style={styles.menuIconContainer}>
               <Ionicons name="shield-outline" size={22} color="#FF6B35" />
             </View>
@@ -245,7 +277,7 @@ export default function ProfileScreen() {
             <Ionicons name="chevron-forward" size={20} color="#666" />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={showHelpInfo}>
             <View style={styles.menuIconContainer}>
               <Ionicons name="help-circle-outline" size={22} color="#FF6B35" />
             </View>
@@ -253,7 +285,7 @@ export default function ProfileScreen() {
             <Ionicons name="chevron-forward" size={20} color="#666" />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={showAboutInfo}>
             <View style={styles.menuIconContainer}>
               <Ionicons name="information-circle-outline" size={22} color="#FF6B35" />
             </View>
@@ -267,7 +299,7 @@ export default function ProfileScreen() {
           <Text style={styles.logoutText}>Logout</Text>
         </TouchableOpacity>
 
-        <Text style={styles.version}>GymBuddy v1.1.0</Text>
+        <Text style={styles.version}>GymBuddy v{APP_VERSION}</Text>
       </ScrollView>
 
       {/* Notification Settings Modal */}

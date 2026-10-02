@@ -90,3 +90,7 @@ credentials.json
 *.key
 .credentials
 .metro-cache/
+
+# User-uploaded images saved locally when S3 is not configured
+backend/uploads/
+.test-uploads/

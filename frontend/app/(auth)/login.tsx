@@ -8,13 +8,14 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../src/contexts/AuthContext';
+import { useDialog } from '../../src/components/DialogProvider';
+import { getErrorMessage } from '../../src/services/api';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
@@ -22,12 +23,13 @@ export default function LoginScreen() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const { login } = useAuth();
+  const dialog = useDialog();
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
   const handleLogin = async () => {
-    if (!email || !password) {
-      Alert.alert('Error', 'Please fill in all fields');
+    if (!email.trim() || !password) {
+      dialog.toast('Please enter your email and password', 'error');
       return;
     }
 
@@ -37,8 +39,7 @@ export default function LoginScreen() {
       router.replace('/(tabs)');
     } catch (error: any) {
       console.log('Login error:', error);
-      const message = error?.response?.data?.detail || 'Invalid email or password';
-      Alert.alert('Login Failed', message);
+      dialog.alert('Login Failed', getErrorMessage(error, 'Invalid email or password'));
     } finally {
       setIsLoading(false);
     }
@@ -84,6 +85,8 @@ export default function LoginScreen() {
               value={password}
               onChangeText={setPassword}
               secureTextEntry={!showPassword}
+              returnKeyType="go"
+              onSubmitEditing={handleLogin}
             />
             <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
               <Ionicons

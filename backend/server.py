@@ -1,30 +1,41 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import ConnectionFailure, DuplicateKeyError
 import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Literal, Optional
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import bcrypt
 import jwt
 import random
+import re
 import string
 import asyncio
 
-from push import send_push_notifications, build_message
-from storage import upload_image
-
 ROOT_DIR = Path(__file__).parent
+# Must run before importing local modules that read configuration from the environment.
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
+from push import send_push_notifications, build_message
+from storage import upload_image, UPLOAD_DIR
+
+def utcnow() -> datetime:
+    """Timezone-aware, so API timestamps carry a UTC marker and clients don't misread them as local time."""
+    return datetime.now(timezone.utc)
+
+# MongoDB connection. Fail fast when the database is down instead of hanging every request for 30s.
+# tz_aware makes stored timestamps (always UTC in BSON) come back timezone-aware too.
 mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
+client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000, tz_aware=True)
 db = client[os.environ.get('DB_NAME', 'gymbuddy_db')]
 
 # JWT Configuration
@@ -34,6 +45,12 @@ JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
 
 # Reactions
 ALLOWED_REACTIONS = {"🔥", "💪", "👏", "😮"}
+
+# Streaks stay alive while both friends check in within this many days of each other
+STREAK_GRACE_DAYS = 3
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+USERNAME_RE = re.compile(r"^[a-z0-9_.]{3,30}$")
 
 # Security
 security = HTTPBearer()
@@ -50,6 +67,17 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Locally stored images (used whenever S3 isn't configured) are served from here.
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
+@app.exception_handler(ConnectionFailure)
+async def database_error_handler(request: Request, exc: ConnectionFailure):
+    logger.error(f"Database error on {request.method} {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "The database is unavailable right now. Make sure MongoDB is running."},
+    )
 
 # ========================= MODELS =========================
 
@@ -76,7 +104,7 @@ class UserProfile(BaseModel):
 
 class PostCreate(BaseModel):
     image: str  # base64 encoded image
-    caption: Optional[str] = ""
+    caption: Optional[str] = Field("", max_length=500)
 
 class PostResponse(BaseModel):
     id: str
@@ -106,17 +134,17 @@ class FriendshipResponse(BaseModel):
     is_requester: bool
 
 class WorkoutExercise(BaseModel):
-    name: str
-    sets: Optional[int] = None
-    reps: Optional[str] = None
-    weight: Optional[str] = None
-    notes: Optional[str] = None
+    name: str = Field(min_length=1, max_length=100)
+    sets: Optional[int] = Field(None, ge=0, le=1000)
+    reps: Optional[str] = Field(None, max_length=50)
+    weight: Optional[str] = Field(None, max_length=50)
+    notes: Optional[str] = Field(None, max_length=500)
 
 class WorkoutCreate(BaseModel):
-    workout_type: str  # 'text' or 'structured'
-    title: str
-    description: Optional[str] = ""
-    exercises: Optional[List[WorkoutExercise]] = []
+    workout_type: Literal["text", "structured"]
+    title: str = Field(min_length=1, max_length=120)
+    description: Optional[str] = Field("", max_length=2000)
+    exercises: Optional[List[WorkoutExercise]] = Field(default_factory=list, max_length=50)
 
 class WorkoutResponse(BaseModel):
     id: str
@@ -144,7 +172,7 @@ def verify_password(password: str, hashed: str) -> bool:
 def create_token(user_id: str) -> str:
     payload = {
         'user_id': user_id,
-        'exp': datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
+        'exp': utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -186,32 +214,49 @@ async def notify_user(user_id: str, setting_key: str, title: str, body: str, dat
 
 @api_router.post("/auth/register")
 async def register(user_data: UserCreate):
+    email = user_data.email.strip().lower()
+    username = user_data.username.strip().lower()
+
+    if not EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Please enter a valid email address")
+    if not USERNAME_RE.match(username):
+        raise HTTPException(
+            status_code=400,
+            detail="Username must be 3-30 characters: letters, numbers, dots or underscores",
+        )
+    if len(user_data.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
     # Check if email exists
-    existing_email = await db.users.find_one({"email": user_data.email.lower()})
+    existing_email = await db.users.find_one({"email": email})
     if existing_email:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     # Check if username exists
-    existing_username = await db.users.find_one({"username": user_data.username.lower()})
+    existing_username = await db.users.find_one({"username": username})
     if existing_username:
         raise HTTPException(status_code=400, detail="Username already taken")
-    
+
     # Generate unique friend code
     friend_code = generate_friend_code()
     while await db.users.find_one({"friend_code": friend_code}):
         friend_code = generate_friend_code()
-    
+
     user = {
         "id": str(uuid.uuid4()),
-        "email": user_data.email.lower(),
-        "password_hash": hash_password(user_data.password),
-        "username": user_data.username.lower(),
+        "email": email,
+        "password_hash": await run_in_threadpool(hash_password, user_data.password),
+        "username": username,
         "friend_code": friend_code,
         "profile_pic": None,
-        "created_at": datetime.utcnow()
+        "created_at": utcnow()
     }
-    
-    await db.users.insert_one(user)
+
+    try:
+        await db.users.insert_one(user)
+    except DuplicateKeyError:
+        # Two sign-ups raced past the checks above; the unique indexes caught it.
+        raise HTTPException(status_code=400, detail="That email or username is already taken")
     token = create_token(user["id"])
     
     return {
@@ -228,8 +273,8 @@ async def register(user_data: UserCreate):
 
 @api_router.post("/auth/login")
 async def login(credentials: UserLogin):
-    user = await db.users.find_one({"email": credentials.email.lower()})
-    if not user or not verify_password(credentials.password, user["password_hash"]):
+    user = await db.users.find_one({"email": credentials.email.strip().lower()})
+    if not user or not await run_in_threadpool(verify_password, credentials.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     
     token = create_token(user["id"])
@@ -262,23 +307,34 @@ async def update_profile(profile: UserProfile, current_user: dict = Depends(get_
     update_data = {}
     
     if profile.username:
+        new_username = profile.username.strip().lower()
+        if not USERNAME_RE.match(new_username):
+            raise HTTPException(
+                status_code=400,
+                detail="Username must be 3-30 characters: letters, numbers, dots or underscores",
+            )
         # Check if username is taken by another user
         existing = await db.users.find_one({
-            "username": profile.username.lower(),
+            "username": new_username,
             "id": {"$ne": current_user["id"]}
         })
         if existing:
             raise HTTPException(status_code=400, detail="Username already taken")
-        update_data["username"] = profile.username.lower()
-    
+        update_data["username"] = new_username
+
     if profile.profile_pic is not None:
-        update_data["profile_pic"] = upload_image(profile.profile_pic, prefix=f"profile/{current_user['id']}")
-    
-    if update_data:
-        await db.users.update_one(
-            {"id": current_user["id"]},
-            {"$set": update_data}
+        update_data["profile_pic"] = await run_in_threadpool(
+            upload_image, profile.profile_pic, f"profile/{current_user['id']}"
         )
+
+    if update_data:
+        try:
+            await db.users.update_one(
+                {"id": current_user["id"]},
+                {"$set": update_data}
+            )
+        except DuplicateKeyError:
+            raise HTTPException(status_code=400, detail="Username already taken")
     
     updated_user = await db.users.find_one({"id": current_user["id"]})
     return UserResponse(
@@ -294,14 +350,14 @@ async def update_profile(profile: UserProfile, current_user: dict = Depends(get_
 
 @api_router.post("/posts")
 async def create_post(post_data: PostCreate, current_user: dict = Depends(get_current_user)):
-    image_url = upload_image(post_data.image, prefix=f"posts/{current_user['id']}")
+    image_url = await run_in_threadpool(upload_image, post_data.image, f"posts/{current_user['id']}")
 
     post = {
         "id": str(uuid.uuid4()),
         "user_id": current_user["id"],
         "image": image_url,
         "caption": post_data.caption or "",
-        "created_at": datetime.utcnow()
+        "created_at": utcnow()
     }
     
     await db.posts.insert_one(post)
@@ -337,38 +393,31 @@ async def get_reactions_summary(post_ids: List[str], viewer_id: str) -> dict:
 
     return summary
 
+async def get_friend_ids(user_id: str) -> List[str]:
+    friendships = await db.friendships.find({
+        "status": "accepted",
+        "$or": [{"user1_id": user_id}, {"user2_id": user_id}]
+    }).to_list(1000)
+    return [f["user2_id"] if f["user1_id"] == user_id else f["user1_id"] for f in friendships]
+
+async def get_users_by_id(user_ids) -> dict:
+    users = await db.users.find({"id": {"$in": list(user_ids)}}).to_list(1000)
+    return {u["id"]: u for u in users}
+
 @api_router.get("/posts/feed")
 async def get_feed(current_user: dict = Depends(get_current_user)):
-    # Get all accepted friendships
-    friendships = await db.friendships.find({
-        "$or": [
-            {"user1_id": current_user["id"], "status": "accepted"},
-            {"user2_id": current_user["id"], "status": "accepted"}
-        ]
-    }).to_list(1000)
-    
-    # Get friend IDs
-    friend_ids = []
-    for f in friendships:
-        if f["user1_id"] == current_user["id"]:
-            friend_ids.append(f["user2_id"])
-        else:
-            friend_ids.append(f["user1_id"])
-    
-    # Include own posts
-    friend_ids.append(current_user["id"])
-    
-    # Get posts from friends and self
+    # Posts from friends and the user's own
+    visible_ids = await get_friend_ids(current_user["id"]) + [current_user["id"]]
     posts = await db.posts.find({
-        "user_id": {"$in": friend_ids}
+        "user_id": {"$in": visible_ids}
     }).sort("created_at", -1).to_list(100)
-    
-    # Get user details for posts
+
+    authors = await get_users_by_id({p["user_id"] for p in posts})
     reactions_by_post = await get_reactions_summary([p["id"] for p in posts], current_user["id"])
 
     result = []
     for post in posts:
-        user = await db.users.find_one({"id": post["user_id"]})
+        user = authors.get(post["user_id"])
         if user:
             reactions = reactions_by_post[post["id"]]
             result.append(PostResponse(
@@ -411,7 +460,11 @@ async def react_to_post(post_id: str, reaction: ReactionCreate, current_user: di
         raise HTTPException(status_code=400, detail="Unsupported reaction")
 
     post = await db.posts.find_one({"id": post_id})
-    if not post:
+    # Posts from non-friends aren't visible to this user, so they shouldn't be reactable either.
+    if not post or (
+        post["user_id"] != current_user["id"]
+        and post["user_id"] not in await get_friend_ids(current_user["id"])
+    ):
         raise HTTPException(status_code=404, detail="Post not found")
 
     await db.reactions.update_one(
@@ -420,7 +473,7 @@ async def react_to_post(post_id: str, reaction: ReactionCreate, current_user: di
             "post_id": post_id,
             "user_id": current_user["id"],
             "emoji": reaction.emoji,
-            "created_at": datetime.utcnow()
+            "created_at": utcnow()
         }},
         upsert=True
     )
@@ -493,6 +546,11 @@ async def send_friend_request(request: FriendRequest, current_user: dict = Depen
         if existing["status"] == "accepted":
             raise HTTPException(status_code=400, detail="Already friends")
         elif existing["status"] == "pending":
+            if existing["user2_id"] == current_user["id"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="They already sent you a request - accept it in the Requests tab",
+                )
             raise HTTPException(status_code=400, detail="Friend request already pending")
     
     friendship = {
@@ -502,7 +560,7 @@ async def send_friend_request(request: FriendRequest, current_user: dict = Depen
         "status": "pending",
         "streak_count": 0,
         "last_mutual_post": None,
-        "created_at": datetime.utcnow()
+        "created_at": utcnow()
     }
     
     await db.friendships.insert_one(friendship)
@@ -518,10 +576,12 @@ async def send_friend_request(request: FriendRequest, current_user: dict = Depen
 
 @api_router.get("/friends/search/{query}")
 async def search_users(query: str, current_user: dict = Depends(get_current_user)):
-    # Search by username or friend code
+    # Search by username or friend code. The query is user input, so it must be escaped before
+    # being used as a regex - otherwise characters like "(" or "[" make the search fail.
+    query = query.strip()
     users = await db.users.find({
         "$or": [
-            {"username": {"$regex": query.lower(), "$options": "i"}},
+            {"username": {"$regex": re.escape(query.lower()), "$options": "i"}},
             {"friend_code": query.upper()}
         ],
         "id": {"$ne": current_user["id"]}
@@ -560,11 +620,12 @@ async def get_friends(current_user: dict = Depends(get_current_user)):
         ]
     }).to_list(1000)
     
+    today = utcnow().date()
     result = []
     for f in friendships:
         friend_id = f["user2_id"] if f["user1_id"] == current_user["id"] else f["user1_id"]
         friend = await db.users.find_one({"id": friend_id})
-        
+
         if friend:
             result.append(FriendshipResponse(
                 id=f["id"],
@@ -572,7 +633,7 @@ async def get_friends(current_user: dict = Depends(get_current_user)):
                 friend_username=friend["username"],
                 friend_profile_pic=friend.get("profile_pic"),
                 status=f["status"],
-                streak_count=f["streak_count"],
+                streak_count=current_streak(f, today),
                 last_mutual_post=f.get("last_mutual_post"),
                 is_requester=f["user1_id"] == current_user["id"]
             ))
@@ -657,10 +718,21 @@ async def remove_friend(friend_id: str, current_user: dict = Depends(get_current
 
 # ========================= STREAKS LOGIC =========================
 
+def _as_date(value):
+    return value.date() if isinstance(value, datetime) else value
+
+def streak_is_active(friendship: dict, today) -> bool:
+    last_mutual = friendship.get("last_mutual_post")
+    return bool(last_mutual) and (today - _as_date(last_mutual)).days <= STREAK_GRACE_DAYS
+
+def current_streak(friendship: dict, today) -> int:
+    """The stored count only means something while the streak is alive; an expired streak is 0."""
+    return friendship.get("streak_count", 0) if streak_is_active(friendship, today) else 0
+
 async def update_streaks_for_user(user_id: str):
     """Update streaks when a user posts"""
-    today = datetime.utcnow().date()
-    
+    today = utcnow().date()
+
     # Get all accepted friendships
     friendships = await db.friendships.find({
         "$or": [
@@ -668,10 +740,10 @@ async def update_streaks_for_user(user_id: str):
             {"user2_id": user_id, "status": "accepted"}
         ]
     }).to_list(1000)
-    
+
     for friendship in friendships:
         friend_id = friendship["user2_id"] if friendship["user1_id"] == user_id else friendship["user1_id"]
-        
+
         # Check if friend also posted today
         friend_post_today = await db.posts.find_one({
             "user_id": friend_id,
@@ -680,31 +752,25 @@ async def update_streaks_for_user(user_id: str):
                 "$lt": datetime.combine(today + timedelta(days=1), datetime.min.time())
             }
         })
-        
+
         if friend_post_today:
             # Both posted today - update streak
             last_mutual = friendship.get("last_mutual_post")
-            current_streak = friendship.get("streak_count", 0)
-            
-            if last_mutual:
-                last_mutual_date = last_mutual.date() if isinstance(last_mutual, datetime) else last_mutual
-                days_diff = (today - last_mutual_date).days
-                
-                if days_diff <= 3:
-                    # Continue streak
-                    new_streak = current_streak + 1
-                else:
-                    # Streak broken, start new
-                    new_streak = 1
+            if last_mutual and _as_date(last_mutual) == today:
+                continue  # today's mutual check-in is already counted; extra posts don't inflate it
+
+            if streak_is_active(friendship, today):
+                new_streak = friendship.get("streak_count", 0) + 1
             else:
-                # First mutual post
+                # First mutual post, or the streak lapsed - start over
                 new_streak = 1
-            
+
             await db.friendships.update_one(
                 {"id": friendship["id"]},
                 {"$set": {
                     "streak_count": new_streak,
-                    "last_mutual_post": datetime.utcnow()
+                    "best_streak": max(friendship.get("best_streak", 0), new_streak),
+                    "last_mutual_post": utcnow()
                 }}
             )
 
@@ -719,7 +785,7 @@ async def get_streaks(current_user: dict = Depends(get_current_user)):
     }).to_list(1000)
     
     result = []
-    today = datetime.utcnow().date()
+    today = utcnow().date()
     
     for f in friendships:
         friend_id = f["user2_id"] if f["user1_id"] == current_user["id"] else f["user1_id"]
@@ -727,15 +793,10 @@ async def get_streaks(current_user: dict = Depends(get_current_user)):
         
         if friend:
             last_mutual = f.get("last_mutual_post")
-            streak_active = False
-            days_remaining = 0
-            
-            if last_mutual:
-                last_mutual_date = last_mutual.date() if isinstance(last_mutual, datetime) else last_mutual
-                days_diff = (today - last_mutual_date).days
-                if days_diff <= 3:
-                    streak_active = True
-                    days_remaining = 3 - days_diff
+            streak_active = streak_is_active(f, today)
+            days_remaining = (
+                STREAK_GRACE_DAYS - (today - _as_date(last_mutual)).days if streak_active else 0
+            )
             
             # Check if user posted today
             user_posted_today = await db.posts.find_one({
@@ -760,7 +821,7 @@ async def get_streaks(current_user: dict = Depends(get_current_user)):
                 "friend_id": friend["id"],
                 "friend_username": friend["username"],
                 "friend_profile_pic": friend.get("profile_pic"),
-                "streak_count": f["streak_count"],
+                "streak_count": current_streak(f, today),
                 "streak_active": streak_active,
                 "days_remaining": days_remaining,
                 "user_posted_today": user_posted_today,
@@ -772,7 +833,7 @@ async def get_streaks(current_user: dict = Depends(get_current_user)):
 
 async def send_streak_warnings():
     """Warn both friends when a streak has exactly one day left and one of them hasn't posted today."""
-    today = datetime.utcnow().date()
+    today = utcnow().date()
     friendships = await db.friendships.find({
         "status": "accepted",
         "streak_count": {"$gt": 0}
@@ -782,11 +843,10 @@ async def send_streak_warnings():
         last_mutual = f.get("last_mutual_post")
         if not last_mutual:
             continue
-        last_mutual_date = last_mutual.date() if isinstance(last_mutual, datetime) else last_mutual
-        days_diff = (today - last_mutual_date).days
+        days_diff = (today - _as_date(last_mutual)).days
 
-        # days_remaining = 3 - days_diff (see /streaks) - warn with exactly 1 day left
-        if days_diff != 2:
+        # days_remaining = STREAK_GRACE_DAYS - days_diff (see /streaks) - warn with exactly 1 day left
+        if days_diff != STREAK_GRACE_DAYS - 1:
             continue
         if f.get("last_streak_warning_date") == today.isoformat():
             continue  # already warned today
@@ -831,14 +891,18 @@ async def streak_warning_scheduler():
 
 @api_router.post("/workouts")
 async def create_workout(workout_data: WorkoutCreate, current_user: dict = Depends(get_current_user)):
+    title = workout_data.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Please enter a title")
+
     workout = {
         "id": str(uuid.uuid4()),
         "user_id": current_user["id"],
         "workout_type": workout_data.workout_type,
-        "title": workout_data.title,
+        "title": title,
         "description": workout_data.description or "",
         "exercises": [e.dict() for e in (workout_data.exercises or [])],
-        "created_at": datetime.utcnow()
+        "created_at": utcnow()
     }
     
     await db.workouts.insert_one(workout)
@@ -857,33 +921,17 @@ async def create_workout(workout_data: WorkoutCreate, current_user: dict = Depen
 
 @api_router.get("/workouts/feed")
 async def get_workouts_feed(current_user: dict = Depends(get_current_user)):
-    # Get all accepted friendships
-    friendships = await db.friendships.find({
-        "$or": [
-            {"user1_id": current_user["id"], "status": "accepted"},
-            {"user2_id": current_user["id"], "status": "accepted"}
-        ]
-    }).to_list(1000)
-    
-    # Get friend IDs
-    friend_ids = []
-    for f in friendships:
-        if f["user1_id"] == current_user["id"]:
-            friend_ids.append(f["user2_id"])
-        else:
-            friend_ids.append(f["user1_id"])
-    
-    # Include own workouts
-    friend_ids.append(current_user["id"])
-    
-    # Get workouts from friends and self
+    # Workouts from friends and the user's own
+    visible_ids = await get_friend_ids(current_user["id"]) + [current_user["id"]]
     workouts = await db.workouts.find({
-        "user_id": {"$in": friend_ids}
+        "user_id": {"$in": visible_ids}
     }).sort("created_at", -1).to_list(100)
-    
+
+    authors = await get_users_by_id({w["user_id"] for w in workouts})
+
     result = []
     for workout in workouts:
-        user = await db.users.find_one({"id": workout["user_id"]})
+        user = authors.get(workout["user_id"])
         if user:
             result.append(WorkoutResponse(
                 id=workout["id"],
@@ -937,22 +985,36 @@ async def root():
 
 @api_router.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow()}
+    try:
+        await client.admin.command("ping")
+        database_ok = True
+    except Exception:
+        database_ok = False
+    return JSONResponse(
+        status_code=200 if database_ok else 503,
+        content={
+            "status": "healthy" if database_ok else "degraded",
+            "database": "ok" if database_ok else "unreachable",
+            "timestamp": utcnow().isoformat(),
+        },
+    )
 
 # ========================= STATS/PROGRESS ENDPOINTS =========================
 
 @api_router.get("/stats")
 async def get_user_stats(current_user: dict = Depends(get_current_user)):
     """Get user's gym statistics and progress"""
-    today = datetime.utcnow().date()
+    today = utcnow().date()
     
     # Calculate date ranges
     week_start = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
     
-    # Get all user's posts
-    all_posts = await db.posts.find({"user_id": current_user["id"]}).to_list(1000)
-    
+    # All of the user's check-in dates (only the timestamp is needed, not the image)
+    all_posts = await db.posts.find(
+        {"user_id": current_user["id"]}, {"created_at": 1}
+    ).to_list(None)
+
     # Total check-ins
     total_checkins = len(all_posts)
     
@@ -976,17 +1038,12 @@ async def get_user_stats(current_user: dict = Depends(get_current_user)):
     total_streak_days = 0
     
     for f in friendships:
-        streak = f.get("streak_count", 0)
-        if streak > best_streak:
-            best_streak = streak
+        streak = current_streak(f, today)
+        # The best streak is remembered even after that streak has lapsed
+        best_streak = max(best_streak, f.get("best_streak", 0), streak)
         total_streak_days += streak
-        
-        # Check if streak is active
-        last_mutual = f.get("last_mutual_post")
-        if last_mutual:
-            last_mutual_date = last_mutual.date() if isinstance(last_mutual, datetime) else last_mutual
-            if (today - last_mutual_date).days <= 3 and streak > 0:
-                active_streaks += 1
+        if streak > 0:
+            active_streaks += 1
     
     # Calculate consistency (check-ins per week over last 4 weeks)
     four_weeks_ago = today - timedelta(weeks=4)
@@ -1048,6 +1105,11 @@ class PushTokenRegister(BaseModel):
 @api_router.post("/notifications/register")
 async def register_push_token(data: PushTokenRegister, current_user: dict = Depends(get_current_user)):
     """Register user's push notification token"""
+    # A device token belongs to one account: if someone else signed in here before, release it from them.
+    await db.users.update_many(
+        {"push_token": data.push_token, "id": {"$ne": current_user["id"]}},
+        {"$unset": {"push_token": ""}}
+    )
     await db.users.update_one(
         {"id": current_user["id"]},
         {"$set": {"push_token": data.push_token}}
@@ -1116,8 +1178,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+async def ensure_indexes():
+    """Unique indexes stop duplicate accounts/reactions, and the rest keep the feed fast as data grows.
+
+    Never raises: a missing index must not stop the server from starting.
+    """
+    try:
+        await client.admin.command("ping")
+    except Exception as exc:
+        logger.error(f"MongoDB is not reachable at startup ({exc}). Is the database running?")
+        return
+
+    specs = [
+        (db.users, [("id", 1)], {"unique": True}),
+        (db.users, [("email", 1)], {"unique": True}),
+        (db.users, [("username", 1)], {"unique": True}),
+        (db.users, [("friend_code", 1)], {"unique": True}),
+        (db.posts, [("id", 1)], {"unique": True}),
+        (db.posts, [("user_id", 1), ("created_at", -1)], {}),
+        (db.friendships, [("id", 1)], {"unique": True}),
+        (db.friendships, [("user1_id", 1), ("user2_id", 1)], {}),
+        (db.reactions, [("post_id", 1), ("user_id", 1)], {"unique": True}),
+        (db.workouts, [("user_id", 1), ("created_at", -1)], {}),
+        (db.notification_settings, [("user_id", 1)], {"unique": True}),
+    ]
+    for collection, keys, options in specs:
+        try:
+            await collection.create_index(keys, **options)
+        except Exception as exc:
+            logger.warning(f"Could not create index {keys} on {collection.name}: {exc}")
+
 @app.on_event("startup")
 async def start_background_tasks():
+    await ensure_indexes()
     asyncio.create_task(streak_warning_scheduler())
 
 @app.on_event("shutdown")

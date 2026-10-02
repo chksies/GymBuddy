@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -12,8 +12,10 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { postsApi } from '../../src/services/api';
+import { postsApi, getErrorMessage } from '../../src/services/api';
 import { useAuth } from '../../src/contexts/AuthContext';
+import { useDialog } from '../../src/components/DialogProvider';
+import ErrorState from '../../src/components/ErrorState';
 
 interface Post {
   id: string;
@@ -33,15 +35,25 @@ export default function FeedScreen() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const hasPostsRef = useRef(false);
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
+  const dialog = useDialog();
 
   const loadPosts = async () => {
     try {
       const response = await postsApi.getFeed();
       setPosts(response.data);
+      hasPostsRef.current = response.data.length > 0;
+      setLoadError(null);
     } catch (error) {
       console.log('Error loading feed:', error);
+      const message = getErrorMessage(error, "Couldn't load your feed.");
+      setLoadError(message);
+      // With nothing on screen the error state says it all; otherwise keep the posts we have
+      // and just let them know the refresh failed
+      if (hasPostsRef.current) dialog.toast(message, 'error');
     } finally {
       setIsLoading(false);
       setRefreshing(false);
@@ -56,6 +68,11 @@ export default function FeedScreen() {
 
   const onRefresh = () => {
     setRefreshing(true);
+    loadPosts();
+  };
+
+  const retry = () => {
+    setIsLoading(true);
     loadPosts();
   };
 
@@ -86,6 +103,7 @@ export default function FeedScreen() {
       }
     } catch (error) {
       console.log('Reaction error:', error);
+      dialog.toast(getErrorMessage(error, "Couldn't save your reaction."), 'error');
       loadPosts(); // revert to server state
     }
   };
@@ -177,7 +195,9 @@ export default function FeedScreen() {
         <Text style={styles.headerTitle}>GymBuddy</Text>
       </View>
 
-      {posts.length === 0 ? (
+      {posts.length === 0 && loadError ? (
+        <ErrorState message={loadError} onRetry={retry} />
+      ) : posts.length === 0 ? (
         <View style={styles.emptyState}>
           <Ionicons name="images-outline" size={64} color="#444" />
           <Text style={styles.emptyTitle}>No posts yet</Text>

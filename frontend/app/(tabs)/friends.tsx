@@ -8,7 +8,6 @@ import {
   TouchableOpacity,
   RefreshControl,
   ActivityIndicator,
-  Alert,
   Image,
   Modal,
   Platform,
@@ -18,8 +17,10 @@ import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import QRCode from 'react-native-qrcode-svg';
-import { friendsApi } from '../../src/services/api';
+import { friendsApi, getErrorMessage } from '../../src/services/api';
 import { useAuth } from '../../src/contexts/AuthContext';
+import { useDialog } from '../../src/components/DialogProvider';
+import ErrorState from '../../src/components/ErrorState';
 
 interface Friend {
   id: string;
@@ -59,32 +60,30 @@ export default function FriendsScreen() {
   const [showQRModal, setShowQRModal] = useState(false);
   const [showScanModal, setShowScanModal] = useState(false);
   const [scanned, setScanned] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [isAdding, setIsAdding] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
-
-  const loadFriends = async () => {
-    try {
-      const response = await friendsApi.getFriends();
-      setFriends(response.data);
-    } catch (error) {
-      console.log('Error loading friends:', error);
-    }
-  };
-
-  const loadRequests = async () => {
-    try {
-      const response = await friendsApi.getRequests();
-      setRequests(response.data);
-    } catch (error) {
-      console.log('Error loading requests:', error);
-    }
-  };
+  const dialog = useDialog();
 
   const loadData = async () => {
-    await Promise.all([loadFriends(), loadRequests()]);
-    setIsLoading(false);
-    setRefreshing(false);
+    try {
+      const [friendsResponse, requestsResponse] = await Promise.all([
+        friendsApi.getFriends(),
+        friendsApi.getRequests(),
+      ]);
+      setFriends(friendsResponse.data);
+      setRequests(requestsResponse.data);
+      setLoadError(null);
+    } catch (error) {
+      console.log('Error loading friends:', error);
+      setLoadError(getErrorMessage(error, "Couldn't load your friends."));
+    } finally {
+      setIsLoading(false);
+      setRefreshing(false);
+    }
   };
 
   useFocusEffect(
@@ -98,14 +97,22 @@ export default function FriendsScreen() {
     loadData();
   };
 
+  const retry = () => {
+    setIsLoading(true);
+    loadData();
+  };
+
   const handleSearch = async () => {
-    if (!searchQuery.trim()) return;
+    const query = searchQuery.trim();
+    if (!query) return;
     setIsSearching(true);
     try {
-      const response = await friendsApi.searchUsers(searchQuery.trim());
+      const response = await friendsApi.searchUsers(query);
       setSearchResults(response.data);
+      setHasSearched(true);
     } catch (error) {
       console.log('Search error:', error);
+      dialog.toast(getErrorMessage(error, 'Search failed. Please try again.'), 'error');
     } finally {
       setIsSearching(false);
     }
@@ -113,29 +120,37 @@ export default function FriendsScreen() {
 
   const handleAddFriend = async (code: string) => {
     if (!code.trim()) {
-      Alert.alert('Error', 'Please enter a friend code');
+      dialog.toast('Please enter a friend code', 'error');
       return;
     }
+    if (isAdding) return;
+    setIsAdding(true);
     try {
-      await friendsApi.sendRequest(code.trim().toUpperCase());
-      Alert.alert('Success', 'Friend request sent!');
+      const normalized = code.trim().toUpperCase();
+      await friendsApi.sendRequest(normalized);
+      dialog.toast('Friend request sent!', 'success');
       setFriendCode('');
-      setSearchQuery('');
-      setSearchResults([]);
+      // Keep any search results on screen, but show this person as pending
+      setSearchResults((results) =>
+        results.map((r) => (r.friend_code === normalized ? { ...r, friendship_status: 'pending' } : r))
+      );
       setShowScanModal(false);
       setScanned(false);
     } catch (error: any) {
-      const message = error?.response?.data?.detail || 'Failed to send request';
-      Alert.alert('Error', message);
+      dialog.alert("Couldn't send request", getErrorMessage(error, 'Failed to send request'));
+      setScanned(false);
+    } finally {
+      setIsAdding(false);
     }
   };
 
   const handleAcceptRequest = async (friendshipId: string) => {
     try {
       await friendsApi.acceptRequest(friendshipId);
+      dialog.toast('Friend request accepted!', 'success');
       loadData();
     } catch (error) {
-      Alert.alert('Error', 'Failed to accept request');
+      dialog.toast(getErrorMessage(error, 'Failed to accept request'), 'error');
     }
   };
 
@@ -144,52 +159,49 @@ export default function FriendsScreen() {
       await friendsApi.declineRequest(friendshipId);
       loadData();
     } catch (error) {
-      Alert.alert('Error', 'Failed to decline request');
+      dialog.toast(getErrorMessage(error, 'Failed to decline request'), 'error');
     }
   };
 
-  const handleRemoveFriend = (friendId: string, username: string) => {
-    Alert.alert(
-      'Remove Friend',
-      `Are you sure you want to remove @${username}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Remove',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await friendsApi.removeFriend(friendId);
-              loadData();
-            } catch (error) {
-              Alert.alert('Error', 'Failed to remove friend');
-            }
-          },
-        },
-      ]
-    );
+  const handleRemoveFriend = async (friendId: string, username: string) => {
+    const confirmed = await dialog.confirm({
+      title: 'Remove Friend',
+      message: `Are you sure you want to remove @${username}? Your streak with them will be lost.`,
+      confirmText: 'Remove',
+      destructive: true,
+    });
+    if (!confirmed) return;
+
+    try {
+      await friendsApi.removeFriend(friendId);
+      dialog.toast(`Removed @${username}`, 'success');
+      loadData();
+    } catch (error) {
+      dialog.toast(getErrorMessage(error, 'Failed to remove friend'), 'error');
+    }
   };
 
   const handleBarCodeScanned = ({ data }: { data: string }) => {
     if (scanned) return;
     setScanned(true);
-    
+
     // Check if it's a valid friend code (6 alphanumeric characters)
     const codeMatch = data.match(/^[A-Z0-9]{6}$/i);
     if (codeMatch) {
       handleAddFriend(data.toUpperCase());
     } else {
-      Alert.alert('Invalid QR Code', 'This QR code does not contain a valid friend code', [
-        { text: 'OK', onPress: () => setScanned(false) }
-      ]);
+      dialog
+        .alert('Invalid QR Code', 'This QR code does not contain a valid friend code')
+        .then(() => setScanned(false));
     }
   };
 
   const openScanner = async () => {
-    if (!permission?.granted) {
+    // Web can't scan QR codes (the scanner modal explains that), so don't ask for the camera there
+    if (Platform.OS !== 'web' && !permission?.granted) {
       const result = await requestPermission();
       if (!result.granted) {
-        Alert.alert('Permission Required', 'Camera permission is needed to scan QR codes');
+        dialog.alert('Permission Required', 'Camera permission is needed to scan QR codes');
         return;
       }
     }
@@ -267,8 +279,9 @@ export default function FriendsScreen() {
       </View>
       {item.friendship_status === 'none' ? (
         <TouchableOpacity
-          style={styles.addButton}
+          style={[styles.addButton, isAdding && { opacity: 0.6 }]}
           onPress={() => handleAddFriend(item.friend_code)}
+          disabled={isAdding}
         >
           <Ionicons name="person-add" size={20} color="#fff" />
         </TouchableOpacity>
@@ -288,6 +301,10 @@ export default function FriendsScreen() {
         <ActivityIndicator size="large" color="#FF6B35" />
       </View>
     );
+  }
+
+  if (loadError && friends.length === 0 && requests.length === 0) {
+    return <ErrorState message={loadError} onRetry={retry} />;
   }
 
   return (
@@ -391,14 +408,20 @@ export default function FriendsScreen() {
                 placeholderTextColor="#666"
                 value={friendCode}
                 onChangeText={setFriendCode}
+                onSubmitEditing={() => handleAddFriend(friendCode)}
                 autoCapitalize="characters"
                 maxLength={6}
               />
               <TouchableOpacity
-                style={styles.addCodeButton}
+                style={[styles.addCodeButton, isAdding && { opacity: 0.6 }]}
                 onPress={() => handleAddFriend(friendCode)}
+                disabled={isAdding}
               >
-                <Ionicons name="add" size={24} color="#fff" />
+                {isAdding ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Ionicons name="add" size={24} color="#fff" />
+                )}
               </TouchableOpacity>
             </View>
           </View>
@@ -422,7 +445,10 @@ export default function FriendsScreen() {
                 placeholder="Search by username..."
                 placeholderTextColor="#666"
                 value={searchQuery}
-                onChangeText={setSearchQuery}
+                onChangeText={(text) => {
+                  setSearchQuery(text);
+                  setHasSearched(false);
+                }}
                 onSubmitEditing={handleSearch}
                 autoCapitalize="none"
               />
@@ -443,6 +469,10 @@ export default function FriendsScreen() {
               keyExtractor={(item) => item.id}
               contentContainerStyle={styles.searchResults}
             />
+          )}
+
+          {hasSearched && searchResults.length === 0 && (
+            <Text style={styles.noResultsText}>No users found for "{searchQuery.trim()}"</Text>
           )}
         </View>
       )}
@@ -795,6 +825,12 @@ const styles = StyleSheet.create({
   },
   searchResults: {
     paddingTop: 8,
+  },
+  noResultsText: {
+    color: '#888',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 24,
   },
   emptyState: {
     flex: 1,

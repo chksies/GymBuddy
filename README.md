@@ -11,7 +11,7 @@ A social fitness accountability app, inspired by Locket and Snapchat: friends sh
 | Area | What's implemented |
 |---|---|
 | **Authentication** | Email/password (bcrypt), JWT access tokens (7-day expiry), auto-generated 6-character friend codes |
-| **Check-ins** | Camera or gallery photo, optional caption, uploaded to S3-compatible object storage |
+| **Check-ins** | Camera or gallery photo, optional caption; photos are saved on disk (or in S3-compatible storage if configured) |
 | **Friends** | Add by friend code or username search, QR code display/scan (mobile), request/accept/decline, remove |
 | **Streaks** | Starts when both friends post the same day; stays alive as long as both post within 3 days; shows days remaining |
 | **Reactions** | Tap to react to a check-in with 🔥 💪 👏 😮; counts and your own reaction shown per post |
@@ -26,7 +26,7 @@ A social fitness accountability app, inspired by Locket and Snapchat: friends sh
 backend/
   server.py            FastAPI app: auth, posts, friends, streaks, workouts, stats, notification settings
   push.py              Sends notifications through Expo's push API
-  storage.py           Uploads check-in/profile images to S3-compatible storage
+  storage.py           Saves check-in/profile images (local disk by default, S3 if configured)
   requirements.txt
   .env.example         Required environment variables
 
@@ -47,12 +47,23 @@ Requires Python 3.9+ and a MongoDB instance (local, Docker, or Atlas).
 
 ```bash
 cd backend
-cp .env.example .env     # fill in MONGO_URL, JWT_SECRET, and the AWS_S3_* image storage vars
+cp .env.example .env     # set MONGO_URL and JWT_SECRET
 pip install -r requirements.txt
 uvicorn server:app --reload --port 8000
 ```
 
-Posting a photo (check-in or profile picture) requires the `AWS_S3_*` variables in `.env.example` to point at a real S3-compatible bucket (AWS S3, Cloudflare R2, DigitalOcean Spaces, or MinIO all work via `boto3`). The bucket needs a policy allowing public `GetObject`, since posted images are served to friends by URL. Without it configured, every other feature works except uploading images.
+**Where your data lives.** Accounts, check-ins, friends, streaks and workouts are stored in MongoDB, so they survive restarts of the app and the API as long as MongoDB keeps running with the same data folder. Check-in and profile photos are saved on disk in `backend/uploads/` (served by the API at `/uploads`), so that folder is part of your data too.
+
+**Optional: S3 for photos.** To store photos in S3-compatible storage instead (AWS S3, Cloudflare R2, DigitalOcean Spaces, or MinIO all work via `boto3`), fill in the `AWS_S3_*` variables from `.env.example`. The bucket needs a policy allowing public `GetObject`, since photos are loaded by URL.
+
+**Tests.** The API tests run against a live server and create accounts and posts, so use a throwaway database and upload folder:
+
+```bash
+cd backend
+DB_NAME=gymbuddy_test UPLOAD_DIR=../.test-uploads uvicorn server:app --port 8001
+# in a second terminal, from the repo root:
+GYMBUDDY_API_URL=http://127.0.0.1:8001 python -m pytest tests -q
+```
 
 ### Frontend
 
@@ -96,8 +107,8 @@ All routes are under `/api`.
 
 ## Known gaps
 
-- No email format validation or password strength requirement on registration
 - No refresh tokens — a single 7-day JWT with no revocation path
 - No rate limiting
 - CORS currently allows all origins
-- No automated test suite yet
+- "Today" for streaks and stats is a UTC day, so an evening check-in in a timezone behind UTC can count toward the next day
+- Web builds can't use the camera for QR scanning or receive push notifications (mobile only)

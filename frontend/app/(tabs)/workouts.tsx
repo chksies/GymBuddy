@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,7 +7,6 @@ import {
   TouchableOpacity,
   RefreshControl,
   ActivityIndicator,
-  Alert,
   Image,
   Modal,
   TextInput,
@@ -18,8 +17,10 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { workoutsApi } from '../../src/services/api';
+import { workoutsApi, getErrorMessage } from '../../src/services/api';
 import { useAuth } from '../../src/contexts/AuthContext';
+import { useDialog } from '../../src/components/DialogProvider';
+import ErrorState from '../../src/components/ErrorState';
 
 interface Exercise {
   name: string;
@@ -51,15 +52,24 @@ export default function WorkoutsScreen() {
   const [description, setDescription] = useState('');
   const [exercises, setExercises] = useState<Exercise[]>([]);
   const [isPosting, setIsPosting] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const hasWorkoutsRef = useRef(false);
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
+  const dialog = useDialog();
 
   const loadWorkouts = async () => {
     try {
       const response = await workoutsApi.getFeed();
       setWorkouts(response.data);
+      hasWorkoutsRef.current = response.data.length > 0;
+      setLoadError(null);
     } catch (error) {
       console.log('Error loading workouts:', error);
+      const message = getErrorMessage(error, "Couldn't load workouts.");
+      setLoadError(message);
+      // With nothing on screen the error state says it all; otherwise keep what we have
+      if (hasWorkoutsRef.current) dialog.toast(message, 'error');
     } finally {
       setIsLoading(false);
       setRefreshing(false);
@@ -74,6 +84,11 @@ export default function WorkoutsScreen() {
 
   const onRefresh = () => {
     setRefreshing(true);
+    loadWorkouts();
+  };
+
+  const retry = () => {
+    setIsLoading(true);
     loadWorkouts();
   };
 
@@ -99,20 +114,23 @@ export default function WorkoutsScreen() {
   };
 
   const handleCreateWorkout = async () => {
+    if (isPosting) return;
+
+    // These run inside the full-screen modal, where a toast would be hidden behind it - use dialogs
     if (!title.trim()) {
-      Alert.alert('Error', 'Please enter a title');
+      dialog.alert('Missing title', 'Please enter a title for your workout.');
       return;
     }
 
     if (workoutType === 'structured' && exercises.length === 0) {
-      Alert.alert('Error', 'Please add at least one exercise');
+      dialog.alert('No exercises yet', 'Please add at least one exercise.');
       return;
     }
 
     if (workoutType === 'structured') {
       const invalidExercise = exercises.find(e => !e.name.trim());
       if (invalidExercise) {
-        Alert.alert('Error', 'Please fill in all exercise names');
+        dialog.alert('Missing exercise name', 'Please fill in a name for every exercise.');
         return;
       }
     }
@@ -123,44 +141,44 @@ export default function WorkoutsScreen() {
         workout_type: workoutType,
         title: title.trim(),
         description: description.trim(),
-        exercises: workoutType === 'structured' ? exercises.map(e => ({
-          name: e.name,
-          sets: e.sets ? Number(e.sets) : undefined,
-          reps: e.reps || undefined,
-          weight: e.weight || undefined,
-        })) : [],
+        exercises: workoutType === 'structured' ? exercises.map(e => {
+          const sets = parseInt(String(e.sets ?? ''), 10);
+          return {
+            name: e.name.trim(),
+            sets: Number.isNaN(sets) ? undefined : sets,
+            reps: e.reps?.trim() || undefined,
+            weight: e.weight?.trim() || undefined,
+          };
+        }) : [],
       });
-      Alert.alert('Success', 'Workout shared!');
+      dialog.toast('Workout shared!', 'success');
       setShowCreateModal(false);
       resetForm();
       loadWorkouts();
     } catch (error) {
-      Alert.alert('Error', 'Failed to share workout');
+      console.log('Share workout error:', error);
+      dialog.alert("Couldn't share workout", getErrorMessage(error, 'Failed to share workout'));
     } finally {
       setIsPosting(false);
     }
   };
 
-  const handleDeleteWorkout = (workoutId: string) => {
-    Alert.alert(
-      'Delete Workout',
-      'Are you sure you want to delete this workout?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await workoutsApi.deleteWorkout(workoutId);
-              loadWorkouts();
-            } catch (error) {
-              Alert.alert('Error', 'Failed to delete workout');
-            }
-          },
-        },
-      ]
-    );
+  const handleDeleteWorkout = async (workoutId: string) => {
+    const confirmed = await dialog.confirm({
+      title: 'Delete Workout',
+      message: 'Are you sure you want to delete this workout?',
+      confirmText: 'Delete',
+      destructive: true,
+    });
+    if (!confirmed) return;
+
+    try {
+      await workoutsApi.deleteWorkout(workoutId);
+      dialog.toast('Workout deleted', 'success');
+      loadWorkouts();
+    } catch (error) {
+      dialog.toast(getErrorMessage(error, 'Failed to delete workout'), 'error');
+    }
   };
 
   const formatTime = (dateString: string) => {
@@ -219,21 +237,22 @@ export default function WorkoutsScreen() {
                 <Text style={styles.exerciseName}>{exercise.name}</Text>
               </View>
               <View style={styles.exerciseDetails}>
-                {exercise.sets && (
+                {/* Ternaries, not `&&`: a stray 0 or "" would render as raw text and crash on phones */}
+                {exercise.sets ? (
                   <View style={styles.detailBadge}>
                     <Text style={styles.detailText}>{exercise.sets} sets</Text>
                   </View>
-                )}
-                {exercise.reps && (
+                ) : null}
+                {exercise.reps ? (
                   <View style={styles.detailBadge}>
                     <Text style={styles.detailText}>{exercise.reps} reps</Text>
                   </View>
-                )}
-                {exercise.weight && (
+                ) : null}
+                {exercise.weight ? (
                   <View style={styles.detailBadge}>
                     <Text style={styles.detailText}>{exercise.weight}</Text>
                   </View>
-                )}
+                ) : null}
               </View>
             </View>
           ))}
@@ -261,6 +280,10 @@ export default function WorkoutsScreen() {
         <ActivityIndicator size="large" color="#FF6B35" />
       </View>
     );
+  }
+
+  if (loadError && workouts.length === 0) {
+    return <ErrorState message={loadError} onRetry={retry} />;
   }
 
   return (

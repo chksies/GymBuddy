@@ -6,7 +6,6 @@ import {
   TouchableOpacity,
   Image,
   TextInput,
-  Alert,
   ActivityIndicator,
   Platform,
   ScrollView,
@@ -16,7 +15,9 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
-import { postsApi } from '../../src/services/api';
+import { postsApi, getErrorMessage } from '../../src/services/api';
+import { useDialog } from '../../src/components/DialogProvider';
+import { assetToDataUri, downscaleDataUri } from '../../src/utils/image';
 
 export default function PostScreen() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -27,60 +28,67 @@ export default function PostScreen() {
   const cameraRef = useRef<any>(null);
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const dialog = useDialog();
 
   const takePicture = async () => {
-    if (cameraRef.current) {
-      try {
-        const photo = await cameraRef.current.takePictureAsync({
-          base64: true,
-          quality: 0.7,
-        });
-        if (photo.base64) {
-          setCapturedImage(`data:image/jpeg;base64,${photo.base64}`);
-        }
-      } catch (error) {
-        console.log('Camera error:', error);
-        Alert.alert('Error', 'Failed to take picture');
+    if (!cameraRef.current) return;
+    try {
+      const photo = await cameraRef.current.takePictureAsync({
+        base64: true,
+        quality: 0.7,
+      });
+      const dataUri = assetToDataUri(photo);
+      if (dataUri) {
+        setCapturedImage(dataUri);
+      } else {
+        dialog.toast("The camera didn't return a photo. Try again.", 'error');
       }
+    } catch (error) {
+      console.log('Camera error:', error);
+      dialog.toast('Failed to take picture. Try again or pick one from your gallery.', 'error');
     }
   };
 
   const pickImage = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.7,
-      base64: true,
-    });
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.7,
+        base64: true,
+      });
 
-    if (!result.canceled && result.assets[0].base64) {
-      setCapturedImage(`data:image/jpeg;base64,${result.assets[0].base64}`);
+      if (result.canceled) return;
+      const dataUri = assetToDataUri(result.assets[0]);
+      if (dataUri) {
+        setCapturedImage(dataUri);
+      } else {
+        dialog.toast("Couldn't read that photo. Try a different one.", 'error');
+      }
+    } catch (error) {
+      console.log('Image picker error:', error);
+      dialog.toast("Couldn't open your gallery.", 'error');
     }
   };
 
   const handlePost = async () => {
-    if (!capturedImage) {
-      Alert.alert('Error', 'Please take or select a photo first');
+    if (!capturedImage || isPosting) {
       return;
     }
 
     setIsPosting(true);
     try {
-      await postsApi.createPost(capturedImage, caption);
-      Alert.alert('Success', 'Gym check-in posted!', [
-        {
-          text: 'OK',
-          onPress: () => {
-            setCapturedImage(null);
-            setCaption('');
-            router.push('/(tabs)');
-          },
-        },
-      ]);
+      const image = await downscaleDataUri(capturedImage);
+      await postsApi.createPost(image, caption.trim());
+      // Reset and head to the feed right away - the screen must not depend on a dialog being dismissed
+      setCapturedImage(null);
+      setCaption('');
+      dialog.toast('Check-in posted!', 'success');
+      router.push('/(tabs)');
     } catch (error: any) {
       console.log('Post error:', error);
-      Alert.alert('Error', 'Failed to post. Please try again.');
+      dialog.alert("Couldn't post your check-in", getErrorMessage(error, 'Failed to post. Please try again.'));
     } finally {
       setIsPosting(false);
     }
@@ -90,7 +98,9 @@ export default function PostScreen() {
     setCameraFacing((current) => (current === 'back' ? 'front' : 'back'));
   };
 
-  if (!permission) {
+  // A photo picked from the gallery needs no camera access, so a chosen photo always gets its
+  // preview - it must not be hidden behind the camera permission prompt.
+  if (!permission && !capturedImage) {
     return (
       <View style={[styles.container, styles.centered]}>
         <ActivityIndicator size="large" color="#FF6B35" />
@@ -98,7 +108,7 @@ export default function PostScreen() {
     );
   }
 
-  if (!permission.granted) {
+  if (!permission?.granted && !capturedImage) {
     return (
       <View style={[styles.container, styles.centered, { paddingTop: insets.top }]}>
         <Ionicons name="camera-outline" size={64} color="#444" />
@@ -106,7 +116,7 @@ export default function PostScreen() {
         <Text style={styles.permissionText}>
           We need camera access to take gym photos
         </Text>
-        <TouchableOpacity style={styles.permissionButton} onPress={requestPermission}>
+        <TouchableOpacity style={styles.permissionButton} onPress={() => requestPermission()}>
           <Text style={styles.permissionButtonText}>Grant Permission</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.galleryButton} onPress={pickImage}>

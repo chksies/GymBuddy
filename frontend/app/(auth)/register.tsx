@@ -8,13 +8,14 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../src/contexts/AuthContext';
+import { useDialog } from '../../src/components/DialogProvider';
+import { getErrorMessage } from '../../src/services/api';
 
 export default function RegisterScreen() {
   const [email, setEmail] = useState('');
@@ -24,27 +25,28 @@ export default function RegisterScreen() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const { register } = useAuth();
+  const dialog = useDialog();
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
   const handleRegister = async () => {
-    if (!email || !username || !password || !confirmPassword) {
-      Alert.alert('Error', 'Please fill in all fields');
+    if (!email.trim() || !username.trim() || !password || !confirmPassword) {
+      dialog.toast('Please fill in all fields', 'error');
       return;
     }
 
     if (password !== confirmPassword) {
-      Alert.alert('Error', 'Passwords do not match');
+      dialog.toast('Passwords do not match', 'error');
       return;
     }
 
     if (password.length < 6) {
-      Alert.alert('Error', 'Password must be at least 6 characters');
+      dialog.toast('Password must be at least 6 characters', 'error');
       return;
     }
 
-    if (username.length < 3) {
-      Alert.alert('Error', 'Username must be at least 3 characters');
+    if (username.trim().length < 3) {
+      dialog.toast('Username must be at least 3 characters', 'error');
       return;
     }
 
@@ -54,8 +56,7 @@ export default function RegisterScreen() {
       router.replace('/(tabs)');
     } catch (error: any) {
       console.log('Register error:', error);
-      const message = error?.response?.data?.detail || 'Registration failed';
-      Alert.alert('Registration Failed', message);
+      dialog.alert('Registration Failed', getErrorMessage(error, 'Registration failed'));
     } finally {
       setIsLoading(false);
     }
@@ -139,6 +140,8 @@ export default function RegisterScreen() {
               value={confirmPassword}
               onChangeText={setConfirmPassword}
               secureTextEntry={!showPassword}
+              returnKeyType="go"
+              onSubmitEditing={handleRegister}
             />
           </View>
 
