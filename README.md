@@ -43,7 +43,7 @@ frontend/
 
 ### Backend
 
-Requires Python 3.9+ and a MongoDB instance (local, Docker, or Atlas).
+Requires Python 3.9+ and a MongoDB instance (installed locally or run in Docker).
 
 ```bash
 cd backend
@@ -84,10 +84,6 @@ eas init
 ```
 
 (requires a free Expo account). Camera, friend QR scanning, and push notifications only work on iOS/Android — the web build runs everything else (feed, reactions, friends, streaks, stats, profile) against the same backend.
-
-## Deploying
-
-To put GymBuddy online for free (MongoDB Atlas + Render + Vercel), follow [DEPLOY.md](DEPLOY.md). The repo already contains the Render blueprint (`render.yaml`) and Vercel config (`frontend/vercel.json`). A deployed server (`ENVIRONMENT=production`) refuses to start without a strong `JWT_SECRET`, and `CORS_ORIGINS` limits which websites can call the API.
 
 ## API overview
 

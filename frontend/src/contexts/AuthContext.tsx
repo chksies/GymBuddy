@@ -49,10 +49,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setServerUnreachable(false);
     try {
       const storedToken = await tokenStorage.get();
-      if (!storedToken) {
-        authApi.wakeServer();
-        return;
-      }
+      if (!storedToken) return;
       setToken(storedToken);
 
       // Only a 401 means the saved login is bad. A flaky connection or a backend that is still

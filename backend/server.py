@@ -36,9 +36,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development').lower()
-IS_PRODUCTION = ENVIRONMENT == 'production'
-
 def utcnow() -> datetime:
     """Timezone-aware, so API timestamps carry a UTC marker and clients don't misread them as local time."""
     return datetime.now(timezone.utc)
@@ -49,15 +46,11 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000, tz_aware=True)
 db = client[os.environ.get('DB_NAME', 'gymbuddy_db')]
 
-# JWT Configuration. Anyone who knows the secret can forge a login for any account, so a deployed
-# server (ENVIRONMENT=production) refuses to start without a long random one. Local development
-# falls back to a built-in key so a fresh clone still runs.
-DEV_JWT_SECRET = 'gymbuddy_secret_key_2025'
+# JWT Configuration. The secret signs everyone's logins; a fresh clone without one falls back to a
+# built-in key so it still runs.
 JWT_SECRET = os.environ.get('JWT_SECRET', '')
-if IS_PRODUCTION and (len(JWT_SECRET) < 32 or JWT_SECRET in (DEV_JWT_SECRET, 'change-me-to-a-long-random-value')):
-    raise RuntimeError("Set JWT_SECRET to a long random value (32+ characters) when ENVIRONMENT=production")
 if not JWT_SECRET:
-    JWT_SECRET = DEV_JWT_SECRET
+    JWT_SECRET = 'gymbuddy_secret_key_2025'
     logger.warning("JWT_SECRET is not set - using the built-in development key. Set one in backend/.env.")
 JWT_ALGORITHM = 'HS256'
 JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
@@ -1194,16 +1187,11 @@ async def update_notification_settings(settings: NotificationSettings, current_u
 # Include the router in the main app
 app.include_router(api_router)
 
-# Which websites may call this API from a browser. Comma-separated, e.g. "https://gymlock.vercel.app".
-# Defaults to any site for local development; set it on a deployed server. The app authenticates with
-# a Bearer token (not cookies), so credentialed CORS isn't needed.
-cors_origins = [o.strip().rstrip('/') for o in os.environ.get('CORS_ORIGINS', '*').split(',') if o.strip()]
-if IS_PRODUCTION and '*' in cors_origins:
-    logger.warning("CORS_ORIGINS is not set - any website can call this API. Set it to your app's URL.")
+# The app authenticates with a Bearer token (not cookies), so credentialed CORS isn't needed.
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=False,
-    allow_origins=cors_origins,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -4,8 +4,7 @@ Images arrive from the client as base64 data URIs. They are validated, then save
 
 - With AWS_S3_BUCKET set, in S3-compatible storage; the public URL is returned.
 - Otherwise, in the database's `media` collection, served by the API at /api/media/<id>.
-  That needs no extra service, and unlike files on disk it survives hosts whose
-  filesystem is wiped on every restart (e.g. Render's free tier).
+  That needs no extra service and keeps all of your data in one place (the database).
 
 Clients shrink photos before uploading, so a photo is typically a few hundred KB.
 """

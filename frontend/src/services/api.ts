@@ -59,8 +59,7 @@ export function getErrorMessage(error: any, fallback: string): string {
 
 const api = axios.create({
   baseURL: `${API_URL}/api`,
-  // Generous because a free-tier host that has gone to sleep can take about a minute to wake up
-  timeout: 45000,
+  timeout: 20000,
 });
 
 // Add auth token to requests
@@ -94,8 +93,6 @@ export const authApi = {
   register: (email: string, password: string, username: string) =>
     api.post('/auth/register', { email, password, username }),
   me: () => api.get('/auth/me'),
-  // Fire-and-forget: wakes a sleeping server while the user is still typing their login
-  wakeServer: () => api.get('/health', { timeout: 90000 }).catch(() => undefined),
 };
 
 // Posts API
