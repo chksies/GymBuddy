@@ -108,6 +108,28 @@ export default function FeedScreen() {
     }
   };
 
+  const handleDelete = async (post: Post) => {
+    const confirmed = await dialog.confirm({
+      title: 'Delete check-in',
+      message: 'This removes the photo and its reactions for everyone, and can\'t be undone.',
+      confirmText: 'Delete',
+      destructive: true,
+    });
+    if (!confirmed) return;
+
+    try {
+      await postsApi.deletePost(post.id);
+      const remaining = posts.filter((p) => p.id !== post.id);
+      hasPostsRef.current = remaining.length > 0;
+      setPosts(remaining);
+      dialog.toast('Check-in deleted', 'success');
+    } catch (error) {
+      console.log('Delete post error:', error);
+      dialog.toast(getErrorMessage(error, "Couldn't delete your check-in."), 'error');
+      loadPosts(); // it may already be gone (e.g. deleted on another device)
+    }
+  };
+
   const formatTime = (dateString: string) => {
     const date = new Date(dateString);
     const now = new Date();
@@ -138,8 +160,18 @@ export default function FeedScreen() {
           </View>
         </View>
         {item.user_id === user?.id && (
-          <View style={styles.myPostBadge}>
-            <Text style={styles.myPostText}>You</Text>
+          <View style={styles.myPostActions}>
+            <View style={styles.myPostBadge}>
+              <Text style={styles.myPostText}>You</Text>
+            </View>
+            <TouchableOpacity
+              style={styles.deleteButton}
+              onPress={() => handleDelete(item)}
+              accessibilityLabel="Delete this check-in"
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Ionicons name="trash-outline" size={20} color="#888" />
+            </TouchableOpacity>
           </View>
         )}
       </View>
@@ -291,6 +323,14 @@ const styles = StyleSheet.create({
     color: '#666',
     fontSize: 13,
     marginTop: 2,
+  },
+  myPostActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  deleteButton: {
+    padding: 4,
   },
   myPostBadge: {
     backgroundColor: '#FF6B35',

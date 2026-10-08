@@ -11,7 +11,7 @@ A social fitness accountability app, inspired by Locket and Snapchat: friends sh
 | Area | What's implemented |
 |---|---|
 | **Authentication** | Email/password (bcrypt), JWT access tokens (7-day expiry), auto-generated 6-character friend codes |
-| **Check-ins** | Camera or gallery photo, optional caption; photos are stored in the database (or in S3-compatible storage if configured) |
+| **Check-ins** | Camera or gallery photo, optional caption; photos are stored in the database (or in S3-compatible storage if configured); delete your own with the trash icon on the feed |
 | **Friends** | Add by friend code or username search, QR code display/scan (mobile), request/accept/decline, remove |
 | **Streaks** | Starts when both friends post the same day; stays alive as long as both post within 3 days; shows days remaining |
 | **Reactions** | Tap to react to a check-in with 🔥 💪 👏 😮; counts and your own reaction shown per post |
@@ -94,6 +94,7 @@ All routes are under `/api`.
 | `POST /auth/register` · `POST /auth/login` | Creates/authenticates a user; returns a JWT |
 | `GET /auth/me` · `PUT /auth/profile` | Current user; update username/profile photo |
 | `POST /posts` · `GET /posts/feed` · `GET /posts/my` | Create a check-in; friends' feed; your own posts |
+| `DELETE /posts/{id}` | Delete your own check-in, with its photo and reactions (404 for anyone else's) |
 | `POST /posts/{id}/react` · `DELETE /posts/{id}/react` | Set or remove your reaction on a post |
 | `POST /friends/request` · `GET /friends/search/{query}` | Send a request by friend code; search by username/code |
 | `GET /friends` · `GET /friends/requests` | List friends; list incoming pending requests |

@@ -106,6 +106,7 @@ export const postsApi = {
     api.post(`/posts/${postId}/react`, { emoji }),
   removeReaction: (postId: string) =>
     api.delete(`/posts/${postId}/react`),
+  deletePost: (postId: string) => api.delete(`/posts/${postId}`),
 };
 
 // Friends API

@@ -150,6 +150,51 @@ def test_reactions(client):
     assert client.delete(f"/posts/{post['id']}/react", headers=friend["headers"]).json()["counts"] == {}
 
 
+def test_delete_post(client):
+    author, friend, stranger = make_user(client), make_user(client), make_user(client)
+    befriend(client, author, friend)
+    post = check_in(client, author, caption="oops").json()
+    client.post(f"/posts/{post['id']}/react", headers=friend["headers"], json={"emoji": "🔥"})
+
+    # Only the author can delete it. Everyone else gets the same 404 as for a missing post.
+    assert client.delete(f"/posts/{post['id']}", headers=friend["headers"]).status_code == 404
+    assert client.delete(f"/posts/{post['id']}", headers=stranger["headers"]).status_code == 404
+    assert client.delete(f"/posts/{uuid.uuid4()}", headers=author["headers"]).status_code == 404
+    assert client.delete(f"/posts/{post['id']}").status_code in (401, 403)
+    assert post["id"] in [p["id"] for p in client.get("/posts/feed", headers=friend["headers"]).json()]
+
+    deleted = client.delete(f"/posts/{post['id']}", headers=author["headers"])
+    assert deleted.status_code == 200, deleted.text
+
+    # Gone for everyone, including its photo and the ability to react to it
+    for viewer in (author, friend):
+        assert post["id"] not in [p["id"] for p in client.get("/posts/feed", headers=viewer["headers"]).json()]
+    assert client.get("/posts/my", headers=author["headers"]).json() == []
+    if post["image"].startswith("/api/media/"):
+        assert httpx.get(f"{BASE}{post['image']}").status_code == 404
+    assert client.post(f"/posts/{post['id']}/react", headers=friend["headers"], json={"emoji": "🔥"}).status_code == 404
+    assert client.delete(f"/posts/{post['id']}", headers=author["headers"]).status_code == 404  # not twice
+
+
+def test_deleting_a_post_leaves_others_and_cannot_inflate_a_streak(client):
+    a, b = make_user(client), make_user(client)
+    befriend(client, a, b)
+    keep = check_in(client, a, caption="keep").json()
+    doomed = check_in(client, a, caption="delete me").json()
+    assert check_in(client, b).status_code == 200  # a and b have now both posted: streak of 1
+
+    assert client.delete(f"/posts/{doomed['id']}", headers=a["headers"]).status_code == 200
+    assert [p["id"] for p in client.get("/posts/my", headers=a["headers"]).json()] == [keep["id"]]
+
+    # Delete the check-in and post again the same day: the day still counts once
+    assert client.delete(f"/posts/{keep['id']}", headers=a["headers"]).status_code == 200
+    assert check_in(client, a).status_code == 200
+    streak = client.get("/streaks", headers=a["headers"]).json()[0]
+    assert streak["streak_count"] == 1
+    stats = client.get("/stats", headers=a["headers"]).json()
+    assert stats["total_checkins"] == 1  # stats follow the posts that still exist
+
+
 def test_streak_counts_each_day_once(client):
     a, b = make_user(client), make_user(client)
     befriend(client, a, b)

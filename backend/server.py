@@ -499,6 +499,25 @@ async def remove_reaction(post_id: str, current_user: dict = Depends(get_current
     summary = await get_reactions_summary([post_id], current_user["id"])
     return summary[post_id]
 
+@api_router.delete("/posts/{post_id}")
+async def delete_post(post_id: str, current_user: dict = Depends(get_current_user)):
+    """Deletes one of your own check-ins, along with its photo and reactions.
+
+    Anyone else's post gets the same 404 as one that doesn't exist, so ids can't be probed.
+    Streaks are left alone: they record that the check-in happened, and checking in again the
+    same day can't count twice (see update_streaks_for_user), so deleting and reposting can't be
+    used to inflate one. Stats are calculated from the posts that remain, so they drop.
+    """
+    # Ownership check and delete in one atomic step
+    post = await db.posts.find_one_and_delete({"id": post_id, "user_id": current_user["id"]})
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    await db.reactions.delete_many({"post_id": post_id})
+    await delete_media(db, post.get("image"))  # no orphaned photos piling up
+
+    return {"message": "Post deleted"}
+
 async def notify_friends_of_post(poster: dict):
     """Ping every accepted friend (who has friend_posts notifications on) that poster just checked in."""
     friendships = await db.friendships.find({
